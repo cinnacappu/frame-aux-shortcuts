@@ -1,0 +1,1505 @@
+// 実機（gpio-keys・SteamVR・PipeWire）無しで動く単体テスト。ctest --test-dir build で動かす。
+// 押し方の判定・明るさの計算・設定の読み書きと version 1 からの移行・状態ファイル・外部の出力の読み取り・
+// WebSocket のフレーム・スクリーンショットの保存先・文言・視界のお知らせ・設定パネルの操作と当たり判定を確かめる。
+#include "brightness.h"
+#include "config.h"
+#include "draw.h"
+#include "hud_message.h"
+#include "i18n.h"
+#include "keyboard_text.h"
+#include "osc.h"
+#include "panel_state.h"
+#include "press_detector.h"
+#include "room_view.h"
+#include "runtime.h"
+#include "screenshot.h"
+#include "settings_panel.h"
+#include "status.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <string>
+#include <vector>
+
+namespace {
+
+int gTotal = 0;
+int gFailures = 0;
+
+/**
+ * 1 つの確かめの結果を出す。
+ * @param what 何を確かめたか
+ * @param ok 合っていれば true
+ */
+void expect(const std::string& what, bool ok) {
+    ++gTotal;
+    if (!ok) ++gFailures;
+    std::printf("%s  %s\n", ok ? "合格  " : "不合格", what.c_str());
+}
+
+/**
+ * 結果が期待どおりか。
+ * @param result 判定の結果
+ * @param kind 期待する種類
+ * @param count 期待する回数（Count・TooMany のとき）
+ * @return 合っていれば true
+ */
+bool is(const PressResult& result, PressResult::Kind kind, int count = 0) {
+    if (result.kind != kind) return false;
+    return kind == PressResult::Kind::Count || kind == PressResult::Kind::TooMany ? result.count == count : true;
+}
+
+/**
+ * 押して離す（押している時間 holdMs）。離したときの結果を返す。
+ * @param d 判定
+ * @param t 押す時刻（ms）。離した時刻に進める
+ * @param holdMs 押している時間
+ * @return 押した・離したときに確定した結果（どちらかで確定すればそれ）
+ */
+PressResult tap(PressDetector& d, int64_t& t, int64_t holdMs = 80) {
+    PressResult down = d.onKey(true, t);
+    t += holdMs;
+    PressResult up = d.onKey(false, t);
+    return down.decided() ? down : up;
+}
+
+/** 押し方の判定。既定（長押し 600 ms・区切り 350 ms・最大 5 回）。 */
+void testPressDetector() {
+    {
+        PressDetector d;
+        int64_t t = 1000;
+        expect("1 回押し: 離した直後はまだ確定しない", !tap(d, t).decided());
+        expect("1 回押し: 締め切りは離してから 350 ms 後", d.nextDeadlineMs() == t + 350);
+        expect("1 回押し: 349 ms では確定しない", !d.onTick(t + 349).decided());
+        expect("1 回押し: 350 ms で 1 回として確定", is(d.onTick(t + 350), PressResult::Kind::Count, 1));
+        expect("1 回押し: 確定した後は締め切りなし", d.nextDeadlineMs() == -1);
+        expect("1 回押し: 確定は 1 回だけ", !d.onTick(t + 2000).decided());
+    }
+    for (int n = 2; n <= 5; ++n) {
+        PressDetector d;
+        int64_t t = 0;
+        for (int i = 0; i < n; ++i) {
+            const bool decided = tap(d, t).decided();
+            if (decided) expect(std::to_string(n) + " 回押し: 途中で確定してしまった", false);
+            t += 200;  // 区切りより短い間隔で次を押す
+        }
+        expect(std::to_string(n) + " 回押し: " + std::to_string(n) + " 回として確定",
+               is(d.onTick(t - 200 + 350), PressResult::Kind::Count, n));
+    }
+    {
+        PressDetector d;
+        int64_t t = 0;
+        for (int i = 0; i < 6; ++i) {
+            tap(d, t);
+            t += 200;
+        }
+        expect("6 回押し: 無視（TooMany）として確定", is(d.onTick(t + 1000), PressResult::Kind::TooMany, 6));
+    }
+    {
+        PressDetector d;
+        int64_t t = 0;
+        expect("長押し: 押した瞬間は確定しない", !d.onKey(true, t).decided());
+        expect("長押し: 締め切りは押してから 600 ms 後", d.nextDeadlineMs() == 600);
+        expect("長押し: 599 ms では確定しない", !d.onTick(599).decided());
+        expect("長押し: 600 ms で、離す前に確定", is(d.onTick(600), PressResult::Kind::LongPress));
+        expect("長押し: 押している間は締め切りなし", d.nextDeadlineMs() == -1);
+        expect("長押し: 押し続けても 2 回目は出ない", !d.onTick(5000).decided());
+        expect("長押し: 確定後の離しは数えない", !d.onKey(false, 5100).decided());
+        expect("長押し: 離した後も回数は確定しない", !d.onTick(9000).decided() && d.nextDeadlineMs() == -1);
+    }
+    {
+        PressDetector d;
+        int64_t t = 0;
+        tap(d, t);  // 1 回押して
+        t += 100;
+        d.onKey(true, t);  // 2 回目を長押し
+        expect("押してから長押し: 長押しとして確定（それまでの回数は捨てる）",
+               is(d.onTick(t + 600), PressResult::Kind::LongPress));
+        d.onKey(false, t + 700);
+        expect("押してから長押し: その後に回数は出ない", !d.onTick(t + 5000).decided());
+    }
+    {
+        PressDetector d;
+        int64_t t = 0;
+        d.onKey(true, 0);
+        expect("599 ms で離すと長押しにならない", !d.onKey(false, 599).decided());
+        expect("599 ms で離すと 1 回押し", is(d.onTick(599 + 350), PressResult::Kind::Count, 1));
+        (void)t;
+    }
+    {
+        // イベントがまとめて届いた（ループが遅れた）ときも、時刻どおりに判定する
+        PressDetector d;
+        d.onKey(true, 0);
+        d.onKey(false, 50);
+        const PressResult late = d.onKey(true, 500);  // 区切り（400）を過ぎてから次の押し
+        expect("遅れて届いた押し: 前の 1 回が先に確定する", is(late, PressResult::Kind::Count, 1));
+        d.onKey(false, 550);
+        expect("遅れて届いた押し: 次の押しは新しい 1 回", is(d.onTick(900), PressResult::Kind::Count, 1));
+    }
+    {
+        PressDetector d;
+        int64_t t = 0;
+        d.onKey(true, 0);
+        expect("押したままの重複（value 1 が 2 回）は無視", !d.onKey(true, 100).decided());
+        expect("押したままの重複: 長押しの締め切りは最初の押しから", d.nextDeadlineMs() == 600);
+        expect("押した記録の無い離しは無視", [] {
+            PressDetector e;
+            return !e.onKey(false, 10).decided() && e.nextDeadlineMs() == -1;
+        }());
+        (void)t;
+    }
+    {
+        PressDetector d;
+        int64_t t = 0;
+        tap(d, t);
+        d.reset();
+        expect("reset: 途中の回数を捨てる", d.nextDeadlineMs() == -1 && !d.onTick(10000).decided());
+    }
+    {
+        PressDetector::Params params;
+        params.longPressMs = 1000;
+        params.multiPressGapMs = 200;
+        PressDetector d(params);
+        int64_t t = 0;
+        tap(d, t, 900);
+        expect("時間を変えた判定: 900 ms 押しでも長押しにならない（1000 ms）", d.nextDeadlineMs() == t + 200);
+        expect("時間を変えた判定: 区切り 200 ms で 1 回", is(d.onTick(t + 200), PressResult::Kind::Count, 1));
+    }
+}
+
+/** 明るさの計算。 */
+void testBrightness() {
+    expect("明るさ: 100% → 1.0", std::fabs(brightnessPercentToGain(100) - 1.0) < 1e-9);
+    expect("明るさ: 125% → 1.25", std::fabs(brightnessPercentToGain(125) - 1.25) < 1e-9);
+    expect("明るさ: 60% → 0.6^2.2", std::fabs(brightnessPercentToGain(60) - std::pow(0.6, 2.2)) < 1e-9);
+    expect("明るさ: 40% → 約 0.134", std::fabs(brightnessPercentToGain(40) - 0.1334) < 0.001);
+    const std::vector<double> levels = {100, 60};
+    expect("明るさ: 今 1.001078（ほぼ 100%）→ 次は 60%", nextBrightnessIndex(levels, 1.001078) == 1);
+    expect("明るさ: 今 60% → 次は 100%", nextBrightnessIndex(levels, std::pow(0.6, 2.2)) == 0);
+    expect("明るさ: 今 0.5（どちらでもない、60% に近い）→ 次は 100%", nextBrightnessIndex(levels, 0.5) == 0);
+    expect("明るさ: 今 0.8（100% に近い）→ 次は 60%", nextBrightnessIndex(levels, 0.8) == 1);
+    const std::vector<double> three = {100, 70, 40};
+    expect("明るさ: 3 段で今 40% → 最初の 100% に戻る", nextBrightnessIndex(three, brightnessPercentToGain(40)) == 0);
+    expect("明るさ: 3 段で今 70% → 40%", nextBrightnessIndex(three, brightnessPercentToGain(70)) == 2);
+    expect("明るさ: 1 段だけなら常にその段", nextBrightnessIndex({80}, 1.0) == 0);
+    expect("明るさ: 値から % に戻す（60% → 60）", std::fabs(brightnessGainToPercent(std::pow(0.6, 2.2)) - 60) < 1e-6);
+    expect("明るさ: 値から % に戻す（1.25 → 125、1.001078 → 約 100）",
+           std::fabs(brightnessGainToPercent(1.25) - 125) < 1e-9 && std::lround(brightnessGainToPercent(1.001078)) == 100);
+}
+
+/** 設定の読み込み・書き出し・version 1 からの移行。 */
+void testConfig() {
+    {
+        const Config config;
+        expect("設定の既定: 1 回 mic_mute_toggle", config.press[0].type == ActionType::MicMuteToggle);
+        expect("設定の既定: 2 回 brightness_cycle", config.press[1].type == ActionType::BrightnessCycle);
+        expect("設定の既定: 3 回 room_view_toggle", config.press[2].type == ActionType::RoomViewToggle);
+        expect("設定の既定: 4 回 screenshot", config.press[3].type == ActionType::Screenshot);
+        expect("設定の既定: 5 回 perf_overlay_toggle", config.press[4].type == ActionType::PerfOverlayToggle);
+        expect("設定の既定: 長押し dashboard_open", config.longPress.type == ActionType::DashboardOpen);
+        expect("設定の既定: 明るさの段 [100, 60, 40]", config.brightnessLevels == std::vector<double>({100, 60, 40}));
+        expect("設定の既定: 600 ms / 350 ms", config.longPressMs == 600 && config.multiPressGapMs == 350);
+        expect("設定の既定: 音・お知らせ・ミュート中の表示・裏で動く・新しい版の確認がオン",
+               config.soundEnabled && config.hudEnabled && config.muteBadge && config.runInBackground &&
+                   config.updateCheck);
+        expect("設定の既定: スクリーンショットは ~/Pictures/frame-aux-shortcuts",
+               config.screenshotDir == "~/Pictures/frame-aux-shortcuts" && config.screenshotToSteam);
+    }
+    auto has = [](const std::vector<std::string>& warnings, const std::string& part) {
+        for (const auto& w : warnings) {
+            if (w.find(part) != std::string::npos) return true;
+        }
+        return false;
+    };
+    {
+        // version 2
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(R"({
+            "version": 2,
+            "long_press_ms": 800,
+            "multi_press_gap_ms": 50,
+            "brightness_levels": [100, 72, 30, 200, 90],
+            "sound": { "enabled": false, "success": "/tmp/a.wav" },
+            "hud": { "enabled": false, "mute_badge": false },
+            "screenshot_dir": "/tmp/shots",
+            "screenshot_to_steam": false,
+            "run_in_background": false,
+            "language": "en",
+            "update_check": false,
+            "actions": {
+                "press_1": "none",
+                "press_2": { "type": "brightness_cycle" },
+                "press_3": { "type": "command", "argv": ["notify-send", "やあ"] },
+                "press_4": { "type": "command" },
+                "press_5": "no_such_action",
+                "long_press": { "type": "mic_mute_toggle" },
+                "press_6": "none"
+            },
+            "extra": 1
+        })",
+                                        config, warnings, error);
+        expect("設定 v2: 読める", ok);
+        expect("設定 v2: long_press_ms 800", config.longPressMs == 800);
+        expect("設定 v2: multi_press_gap_ms は 100 に収める", config.multiPressGapMs == 100);
+        expect("設定 v2: 明るさの段は 5 刻み・40〜125 に直して 4 段まで",
+               config.brightnessLevels == std::vector<double>({100, 70, 40, 125}));
+        expect("設定 v2: 5 段目を使わないことを知らせる", has(warnings, "4 段まで"));
+        expect("設定 v2: 音を消せる・パスを変えられる、書いていない failure は既定のまま",
+               !config.soundEnabled && config.successSound == "/tmp/a.wav" && config.failureSound == kDefaultFailureSound);
+        expect("設定 v2: hud の 2 つ", !config.hudEnabled && !config.muteBadge);
+        expect("設定 v2: screenshot_dir・run_in_background・language・update_check",
+               config.screenshotDir == "/tmp/shots" && !config.screenshotToSteam && !config.runInBackground && config.language == Language::En &&
+                   !config.updateCheck);
+        expect("設定 v2: 文字列だけで none", config.press[0].type == ActionType::None);
+        expect("設定 v2→3: command の argv を commands に移して id で参照する",
+               config.press[2].type == ActionType::Command && config.press[2].commandId == "c1" &&
+                   config.commands.size() == 1 && config.commands[0].id == "c1" && config.commands[0].name == "notify-send" &&
+                   config.commands[0].argv == std::vector<std::string>({"notify-send", "やあ"}) && has(warnings, "commands に移しました"));
+        expect("設定 v2: argv の無い command は none にする", config.press[3].type == ActionType::None);
+        expect("設定 v2: 知らない種類は既定の割り当てのまま", config.press[4].type == ActionType::PerfOverlayToggle);
+        expect("設定 v2: 長押しを変えられる", config.longPress.type == ActionType::MicMuteToggle);
+        expect("設定 v2: 知らないキー（extra・press_6）を知らせる", has(warnings, "extra") && has(warnings, "press_6"));
+        expect("設定 v2: 知らない種類を知らせる", has(warnings, "no_such_action"));
+    }
+    {
+        // version 1（今までの形）: 明るさの段はアクションの中、echo_cancel_toggle がある
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(R"({
+            "long_press_ms": 600,
+            "multi_press_gap_ms": 350,
+            "sound": { "enabled": true },
+            "actions": {
+                "press_1": { "type": "mic_mute_toggle" },
+                "press_2": { "type": "brightness_cycle", "levels": [100, 60] },
+                "press_3": "room_view_toggle",
+                "press_4": { "type": "echo_cancel_toggle" },
+                "press_5": "none",
+                "long_press": { "type": "dashboard_open" }
+            }
+        })",
+                                        config, warnings, error);
+        expect("設定 v1: 読める", ok);
+        expect("設定 v1: アクションの中の levels を明るさの段にする", config.brightnessLevels == std::vector<double>({100, 60}));
+        expect("設定 v1: echo_cancel_toggle は none として読む", config.press[3].type == ActionType::None);
+        expect("設定 v1: echo_cancel_toggle を知らせる", has(warnings, "echo_cancel_toggle"));
+        expect("設定 v1: ほかの割り当てはそのまま",
+               config.press[0].type == ActionType::MicMuteToggle && config.press[1].type == ActionType::BrightnessCycle &&
+                   config.press[2].type == ActionType::RoomViewToggle && config.press[4].type == ActionType::None &&
+                   config.longPress.type == ActionType::DashboardOpen);
+        expect("設定 v1: 書いていない新しい項目は既定値", config.hudEnabled && config.muteBadge && config.runInBackground);
+    }
+    {
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        parseConfigText(R"({ "brightness_levels": [80, 60],
+                             "actions": { "press_2": { "type": "brightness_cycle", "levels": [100, 50] } } })",
+                        config, warnings, error);
+        expect("設定: brightness_levels があればアクションの levels は使わない",
+               config.brightnessLevels == std::vector<double>({80, 60}) && has(warnings, "levels"));
+        parseConfigText(R"({ "brightness_levels": [80] })", config, warnings, error);
+        expect("設定: 1 段だけなら既定の段", config.brightnessLevels == std::vector<double>({100, 60, 40}));
+    }
+    {
+        // 書き出して読み直すと同じになる（設定パネルの保存）
+        Config config;
+        config.longPressMs = 900;
+        config.multiPressGapMs = 250;
+        config.brightnessLevels = {125, 80, 45, 40};
+        config.soundEnabled = false;
+        config.successSound = "/tmp/a \"b\".wav";
+        config.hudEnabled = false;
+        config.muteBadge = false;
+        config.screenshotDir = "~/Pictures/x";
+        config.screenshotToSteam = false;
+        config.runInBackground = false;
+        config.language = Language::En;
+        config.updateCheck = false;
+        config.commands = {{"c1", "通知 \"テスト\"", {"notify-send", "a\\b", "空白 のある 引数"}, false},
+                           {"c7", "Second", {"/bin/true"}, false}};
+        config.commandOrder = {"c7", "dir:x.sh", "c1"};
+        config.press[0].type = ActionType::Command;
+        config.press[0].commandId = "c1";
+        config.press[3].type = ActionType::None;
+        config.longPress.type = ActionType::Screenshot;
+        const std::string json = configToJson(config);
+        Config read;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(json, read, warnings, error);
+        expect("設定の書き出し: 読み直せる・知らせなし", ok && warnings.empty());
+        expect("設定の書き出し: version 3", json.find("\"version\": 3") != std::string::npos);
+        expect("設定の書き出し: 読み直すと同じ", configToJson(read) == json);
+        expect("設定の書き出し: 中身も同じ",
+               read.longPressMs == 900 && read.multiPressGapMs == 250 && read.brightnessLevels == config.brightnessLevels &&
+                   !read.soundEnabled && read.successSound == config.successSound && !read.hudEnabled && !read.muteBadge &&
+                   read.screenshotDir == "~/Pictures/x" && !read.screenshotToSteam && !read.runInBackground && read.language == Language::En &&
+                   !read.updateCheck && read.press[0].type == ActionType::Command && read.press[0].commandId == "c1" &&
+                   read.commands == config.commands && read.commandOrder == config.commandOrder &&
+                   read.longPress.type == ActionType::Screenshot);
+        // 割り当ては id だけ（argv はアクションに書かない）
+        expect("設定の書き出し: 割り当ては { type, command }",
+               json.find("\"press_1\": { \"type\": \"command\", \"command\": \"c1\" }") != std::string::npos);
+    }
+    {
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        expect("設定: 壊れた JSON は読めない", !parseConfigText("{ \"long_press_ms\": ", config, warnings, error) &&
+                                                  !error.empty());
+        expect("設定: 一番外側が配列なら読めない", !parseConfigText("[1]", config, warnings, error));
+    }
+    expect("設定: ~ をホームフォルダにする", expandHome("~/a") == std::string(std::getenv("HOME") ? std::getenv("HOME") : "") + "/a" &&
+                                              expandHome("/x/~") == "/x/~" && expandHome("~user/a") == "~user/a");
+    expect("設定: 種類の一覧の名前と読み方が対になっている", [] {
+        for (const auto& spec : actionSpecs()) {
+            ActionType type = ActionType::None;
+            if (!parseActionType(spec.name, type) || type != spec.type || std::string(actionTypeName(type)) != spec.name) {
+                return false;
+            }
+        }
+        return actionSpecs().size() == 8 && actionSpecs().back().type == ActionType::None;
+    }());
+}
+
+/** 状態ファイル。 */
+void testStatus() {
+    Status s;
+    s.version = "0.2.0";
+    s.pid = 1234;
+    s.active = true;
+    s.vrConnected = true;
+    s.lastPress.kind = PressRecord::Kind::Count;
+    s.lastPress.count = 2;
+    s.lastPress.action = ActionType::BrightnessCycle;
+    s.lastPress.ok = true;
+    s.lastPress.value = "60";
+    s.lastPress.detail = "明るさ \"1.000\" → 60%";
+    s.lastPress.at = 1791290640;
+    s.micMuted = 1;
+    s.brightnessPercent = 60;
+    s.roomView = 0;
+    s.perfVisible = -1;
+    s.perfOverlay = AppState::Stopped;
+    s.updatedAt = 1791290641;
+    const std::string json = statusToJson(s);
+    Status read;
+    std::string error;
+    expect("状態: 読み直せる", parseStatusText(json, read, error));
+    expect("状態: 中身が同じ", statusToJson(read) == json);
+    expect("状態: 値", read.pid == 1234 && read.active && read.lastPress.slot() == 1 &&
+                           read.lastPress.action == ActionType::BrightnessCycle && read.micMuted == 1 &&
+                           read.brightnessPercent == 60 && read.roomView == 0 && read.perfVisible == -1 &&
+                           read.perfOverlay == AppState::Stopped);
+    expect("状態: ファイルの形（apps・mic_muted・last_press.kind）",
+           json.find("\"apps\": { \"frame-perf-overlay\": \"stopped\" }") != std::string::npos &&
+               json.find("\"kind\": \"count\"") != std::string::npos && json.find("\"mic_muted\": true") != std::string::npos);
+    Status empty;
+    const std::string emptyJson = statusToJson(empty);
+    expect("状態: まだ押していなければ last_press は null", emptyJson.find("\"last_press\": null") != std::string::npos);
+    Status emptyRead;
+    expect("状態: 分からない値は null → -1",
+           parseStatusText(emptyJson, emptyRead, error) && emptyRead.micMuted == -1 && emptyRead.brightnessPercent == -1 &&
+               emptyRead.lastPress.kind == PressRecord::Kind::None && emptyRead.lastPress.slot() == -1);
+    PressRecord longPress;
+    longPress.kind = PressRecord::Kind::Long;
+    expect("状態: 長押しの番号は 5", longPress.slot() == kLongPressSlot);
+    expect("状態: 壊れた JSON は読めない", !parseStatusText("{", read, error));
+}
+
+/** 外部の出力の読み取り・プロセスの見分け・room view の送信の形・スクリーンショットの保存先。 */
+void testParsers() {
+    bool muted = false;
+    expect("wpctl: 「Volume: 1.00 [MUTED]」→ ミュート", parseWpctlMuted("Volume: 1.00 [MUTED]\n", muted) && muted);
+    expect("wpctl: 「Volume: 0.45」→ ミュートでない", parseWpctlMuted("Volume: 0.45\n", muted) && !muted);
+    expect("wpctl: 関係ない出力は読めない", !parseWpctlMuted("Translate ID error\n", muted));
+
+    expect("プロセス: フルパスの argv[0]",
+           isCmdlineOf(std::string("/home/steamos/.local/bin/frame-perf-overlay\0--verbose\0", 54), "frame-perf-overlay"));
+    expect("プロセス: 名前だけの argv[0]", isCmdlineOf(std::string("frame-perf-overlay\0", 19), "frame-perf-overlay"));
+    expect("プロセス: 別のプロセスは違う", !isCmdlineOf(std::string("/usr/bin/bash\0", 14), "frame-perf-overlay"));
+    expect("プロセス: 似た名前は違う（本体とパネル）",
+           !isCmdlineOf(std::string("frame-aux-shortcuts-panel\0", 26), "frame-aux-shortcuts") &&
+               isCmdlineOf(std::string("frame-aux-shortcuts-panel\0", 26), "frame-aux-shortcuts-panel"));
+
+    expect("room view: オンの文", roomViewMailboxMessage(true) ==
+                                    "mailbox_send vrcompositor_systemlayer "
+                                    "{\"type\":\"set_camera_roomview_enabled\",\"enabled\":true}");
+    expect("room view: オフの文", roomViewMailboxMessage(false).find("\"enabled\":false}") != std::string::npos);
+    const uint8_t mask[4] = {0x37, 0xfa, 0x21, 0x3d};
+    // RFC 6455 5.7 の例: マスク付きの "Hello"
+    const std::string hello = buildMaskedTextFrame("Hello", mask);
+    const unsigned char expected[] = {0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58};
+    expect("WebSocket: RFC 6455 の例と同じフレーム",
+           hello == std::string(reinterpret_cast<const char*>(expected), sizeof(expected)));
+    const std::string longFrame = buildMaskedTextFrame(std::string(200, 'a'), mask);
+    expect("WebSocket: 126 バイト以上は 16 ビットの長さ",
+           longFrame.size() == 2 + 2 + 4 + 200 && static_cast<uint8_t>(longFrame[1]) == (0x80 | 126) &&
+               static_cast<uint8_t>(longFrame[2]) == 0 && static_cast<uint8_t>(longFrame[3]) == 200);
+    expect("WebSocket: 65536 バイト以上は作らない", buildMaskedTextFrame(std::string(70000, 'a'), mask).empty());
+
+    std::tm tm {};
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 9;
+    tm.tm_mday = 6;
+    tm.tm_hour = 9;
+    tm.tm_min = 8;
+    tm.tm_sec = 1;
+    expect("スクリーンショット: ファイル名", screenshotFileName(tm) == "screenshot_2026-10-06_09-08-01.png");
+    {
+        // 保存先とファイル名（フォルダを作り、同じ名前があれば _2。拡張子なしの名前を RequestScreenshot に渡す）
+        char base[] = "/tmp/fas-shot-test-XXXXXX";
+        const std::string tmp = mkdtemp(base) != nullptr ? base : "/tmp";
+        const std::string dir = tmp + "/a/b";
+        ScreenshotPaths paths;
+        std::string error;
+        const bool ok = prepareScreenshotPaths(dir + "/", tm, paths, error);
+        expect("スクリーンショット: フォルダを作って名前を決める",
+               ok && access(dir.c_str(), F_OK) == 0 && paths.path == dir + "/screenshot_2026-10-06_09-08-01.png" &&
+                   paths.previewBase + ".png" == paths.path && paths.vrBase == dir + "/.screenshot_2026-10-06_09-08-01_vr");
+        FILE* f = std::fopen(paths.path.c_str(), "w");
+        if (f != nullptr) std::fclose(f);
+        ScreenshotPaths second;
+        expect("スクリーンショット: 同じ秒の 2 枚目は _2",
+               prepareScreenshotPaths(dir, tm, second, error) &&
+                   second.path == dir + "/screenshot_2026-10-06_09-08-01_2.png");
+        std::remove(paths.path.c_str());
+        std::remove(dir.c_str());
+        std::remove((tmp + "/a").c_str());
+        std::remove(tmp.c_str());
+    }
+}
+
+/** 文言の表と、視界のお知らせの中身。 */
+void testTextAndHud() {
+    for (const Language lang : {Language::Ja, Language::En}) {
+        const UiText& t = uiText(lang);
+        const auto* fields = reinterpret_cast<const char* const*>(&t);
+        bool complete = true;
+        for (size_t i = 0; i < sizeof(UiText) / sizeof(const char*); ++i) {
+            if (fields[i] == nullptr) complete = false;
+        }
+        expect(std::string("文言: ") + (lang == Language::Ja ? "日本語" : "英語") + "の表に抜けがない", complete);
+        for (const auto& spec : actionSpecs()) {
+            if (std::string(actionLabel(lang, spec.type)).empty()) complete = false;
+        }
+        expect(std::string("文言: ") + (lang == Language::Ja ? "日本語" : "英語") + "のアクションの名前", complete);
+    }
+    expect("文言: 押し方の名前", slotLabel(Language::Ja, 1) == "2 回押し" && slotLabel(Language::Ja, 5) == "長押し" &&
+                                    slotLabel(Language::En, 0) == "1 press" && slotLabel(Language::En, 2) == "3 presses");
+    expect("文言: スクリーンショットの名前・お知らせ",
+           std::string(actionLabel(Language::Ja, ActionType::Screenshot)) == "スクリーンショット" &&
+               std::string(uiText(Language::Ja).hudShot) == "スクリーンショットを保存しました" &&
+               std::string(uiText(Language::Ja).failShot) == "スクリーンショットを撮れませんでした");
+
+    PressRecord press;
+    press.kind = PressRecord::Kind::Count;
+    press.count = 1;
+    press.action = ActionType::MicMuteToggle;
+    press.value = "muted";
+    HudToast toast;
+    expect("お知らせ: ミュート", makeHudToast(press, Language::Ja, toast) && toast.title == "マイクをミュートしました" &&
+                                   toast.sub == "1 回押し" && toast.icon == Icon::MicOff && !toast.error);
+    press.value = "unmuted";
+    expect("お知らせ: ミュート解除", makeHudToast(press, Language::Ja, toast) && toast.title == "マイクをオンにしました" &&
+                                       toast.tone == HudToast::Tone::Success);
+    press.count = 2;
+    press.action = ActionType::BrightnessCycle;
+    press.value = "60";
+    expect("お知らせ: 明るさ", makeHudToast(press, Language::Ja, toast) && toast.title == "明るさ 60%" &&
+                                 toast.sub == "2 回押し");
+    press.count = 3;
+    press.action = ActionType::RoomViewToggle;
+    press.ok = false;
+    press.reason = "room_view_api";
+    expect("お知らせ: パススルーの失敗の文言",
+           makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "パススルーを切り替えられません" &&
+               toast.sub == "3 回押し・SteamVR の更新で使えなくなったかも");
+    press.count = 4;
+    press.action = ActionType::Screenshot;
+    press.ok = true;
+    expect("お知らせ: スクリーンショット", makeHudToast(press, Language::Ja, toast) &&
+                                           toast.title == "スクリーンショットを保存しました" && toast.icon == Icon::Camera);
+    press.ok = false;
+    press.reason = "failed";
+    expect("お知らせ: スクリーンショットの失敗",
+           makeHudToast(press, Language::Ja, toast) && toast.title == "スクリーンショットを撮れませんでした");
+    press.ok = true;
+    press.action = ActionType::None;
+    expect("お知らせ: none は出さない", !makeHudToast(press, Language::Ja, toast));
+    press.kind = PressRecord::Kind::Long;
+    press.action = ActionType::DashboardOpen;
+    expect("お知らせ: ダッシュボードが開いたときは出さない", !makeHudToast(press, Language::Ja, toast));
+    press.kind = PressRecord::Kind::TooMany;
+    press.count = 6;
+    press.action = ActionType::MicMuteToggle;
+    expect("お知らせ: 6 回以上は出さない", !makeHudToast(press, Language::Ja, toast));
+    press.kind = PressRecord::Kind::Count;
+    press.count = 2;
+    press.action = ActionType::Command;
+    press.ok = true;
+    press.value = "osc:/input/Voice";
+    press.reason.clear();
+    expect("お知らせ: VRChat のミュートを送った",
+           makeHudToast(press, Language::Ja, toast) && toast.title == "VRChat にミュートの切り替えを送りました" &&
+               toast.sub == "2 回押し" && !toast.error);
+    expect("お知らせ: VRChat のミュートを送った（英語）",
+           makeHudToast(press, Language::En, toast) && toast.title == "Sent mute toggle to VRChat");
+    press.ok = false;
+    press.reason = "no_pc";
+    expect("お知らせ: つないでいる PC が見つからない",
+           makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "VRChat に送れません" &&
+               toast.sub == "2 回押し・つないでいる PC が見つかりません");
+    press.ok = true;
+    press.value = "osc:/avatar/parameters/Foo";
+    expect("お知らせ: ほかの OSC のアドレス", makeHudToast(press, Language::Ja, toast) &&
+                                                 toast.title == "OSC を送りました: /avatar/parameters/Foo");
+    press.value = "通知";
+    expect("お知らせ: ふつうのコマンドは名前", makeHudToast(press, Language::Ja, toast) && toast.title == "通知");
+}
+
+/** OSC: パケットの組み方・IP の形・送り先・組み込みのコマンド・/proc/net/udp の読み方・実際に送る。 */
+void testOsc() {
+    const std::string voice = encodeOscInt("/input/Voice", 1);
+    expect("OSC: /input/Voice に 1 は 24 バイト（アドレス 16 ＋ \",i\" 4 ＋ 値 4）",
+           voice == std::string("/input/Voice\0\0\0\0,i\0\0\0\0\0\x01", 24));
+    expect("OSC: アドレスが 4 の倍数でも NUL を 4 つ足す", encodeOscInt("/abc", 0).size() == 16 &&
+                                                             encodeOscInt("/abc", 0).substr(4, 4) == std::string(4, '\0'));
+    expect("OSC: 値はビッグエンディアン", encodeOscInt("/a", 0x01020304).substr(8) == "\x01\x02\x03\x04" &&
+                                            encodeOscInt("/a", -1).substr(8) == "\xff\xff\xff\xff");
+
+    expect("IP: 正しい形", isValidIpv4("192.168.0.12") && isValidIpv4("0.0.0.0") && isValidIpv4("255.255.255.255"));
+    bool bad = false;
+    for (const char* text : {"", "256.1.1.1", "1.2.3", "1.2.3.4.5", "01.2.3.4", "1.2.3.4.", ".1.2.3", "a.b.c.d", " 1.2.3.4",
+                             "1..2.3", "1.2.3.-4", "1.2.3.4:9000"}) {
+        if (isValidIpv4(text)) bad = true;
+    }
+    expect("IP: 正しくない形は通さない", !bad);
+
+    SendOscCommand target;
+    expect("送り先: auto:9000", parseOscTarget("auto:9000", target) && target.autoHost && target.port == 9000);
+    expect("送り先: IP とポート", parseOscTarget("192.168.0.12:9001", target) && !target.autoHost &&
+                                     target.host == "192.168.0.12" && target.port == 9001);
+    expect("送り先: ポートを省くと 9000", parseOscTarget("auto", target) && target.port == 9000);
+    expect("送り先: 正しくない書き方は通さない", !parseOscTarget("auto:0", target) && !parseOscTarget("auto:70000", target) &&
+                                                    !parseOscTarget("pc.local:9000", target) && !parseOscTarget("auto:", target));
+
+    SendOscCommand command;
+    const std::vector<std::string> argv = makeSendOscArgv(true, "", 9000, "/input/Voice");
+    expect("組み込み: プリセットの argv",
+           argv == std::vector<std::string>({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/input/Voice"}));
+    expect("組み込み: プリセットの argv を読める", parseSendOscCommand(argv, command) && command.autoHost &&
+                                                      command.port == 9000 && command.address == "/input/Voice");
+    std::vector<std::string> split;
+    std::string error;
+    expect("組み込み: 文字列にして戻しても同じ", splitCommandLine(joinCommandLine(argv), split, error) && split == argv);
+    expect("組み込み: 絶対パスでもよい",
+           parseSendOscCommand({"/home/steamos/.local/bin/frame-aux-shortcuts", "--send-osc", "192.168.0.12:9000", "/input/Voice"},
+                               command) &&
+               !command.autoHost && command.host == "192.168.0.12");
+    expect("組み込み: ほかのプログラムは組み込みにしない",
+           !parseSendOscCommand({"frame-aux-shortcutsx", "--send-osc", "auto:9000", "/input/Voice"}, command) &&
+               !parseSendOscCommand({"other", "--send-osc", "auto:9000", "/input/Voice"}, command));
+    expect("組み込み: 引数の数・アドレスが違えば組み込みにしない",
+           !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000"}, command) &&
+               !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "input"}, command) &&
+               !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/a b"}, command) &&
+               !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/input/Voice", "1"}, command));
+    expect("組み込み: アドレスに制御文字・NUL・長すぎは不可",
+           !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/in\x01put"}, command) &&
+               !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", std::string("/in\0put", 7)}, command) &&
+               !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/a\x7f"}, command) &&
+               !parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/" + std::string(128, 'a')}, command) &&
+               parseSendOscCommand({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/" + std::string(127, 'a')}, command));
+
+    // /proc/net/udp: アドレスは 32 ビットごとにマシンのバイト順の 16 進（Frame は little-endian）
+    const std::string head =
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n";
+    const std::string udp = head +
+        "  100: 0100007F:A3B1 0100007F:0035 01 00000000:00000000 00:00000000 00000000  1000        0 11111 2 0000000000000000 0\n"
+        "  101: 2200A8C0:C001 0C00A8C0:6987 01 00000000:00000000 00:00000000 00000000  1000        0 22222 2 0000000000000000 0\n"
+        "  102: 2200A8C0:C002 0100A8C0:0035 01 00000000:00000000 00:00000000 00000000  1000        0 33333 2 0000000000000000 0\n"
+        "  103: 00000000:0044 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 44444 2 0000000000000000 0\n";
+    std::string ip;
+    expect("相手: Steam Link のソケットの相手（192.168.0.12）", findConnectedUdpPeer(udp, {22222}, ip) && ip == "192.168.0.12");
+    expect("相手: inode で選ぶ", findConnectedUdpPeer(udp, {33333, 44444}, ip) && ip == "192.168.0.1");
+    expect("相手: ループバックは使わない", !findConnectedUdpPeer(udp, {11111}, ip));
+    expect("相手: つながっていない（状態 07）は使わない", !findConnectedUdpPeer(udp, {44444}, ip));
+    expect("相手: 違う候補が 2 つ以上なら見つからない", !findConnectedUdpPeer(udp, {}, ip) &&
+                                                          !findConnectedUdpPeer(udp, {22222, 33333}, ip));
+    {
+        const std::string pub = head +
+            "  110: 2200A8C0:C001 08080808:6987 01 00000000:00000000 00:00000000 00000000  1000        0 77777 2 0000000000000000 0\n"
+            "  111: 2200A8C0:C003 0C00A8C0:6988 01 00000000:00000000 00:00000000 00000000  1000        0 88888 2 0000000000000000 0\n"
+            "  112: 2200A8C0:C004 0C00A8C0:6989 01 00000000:00000000 00:00000000 00000000  1000        0 99999 2 0000000000000000 0\n";
+        expect("相手: LAN の外（8.8.8.8）は使わない", !findConnectedUdpPeer(pub, {77777}, ip));
+        expect("相手: LAN の外と私的な 1 つなら私的な方", findConnectedUdpPeer(pub, {77777, 88888}, ip) && ip == "192.168.0.12");
+        expect("相手: 同じアドレスが 2 つは 1 つと数える", findConnectedUdpPeer(pub, {88888, 99999}, ip) && ip == "192.168.0.12");
+    }
+    for (const char* lan : {"10.0.0.2", "172.16.0.1", "172.31.255.255", "192.168.0.12", "169.254.1.2", "100.64.0.1",
+                            "100.127.255.255", "fc00::1", "fd12:3456::1", "fe80::1", "febf::1", "::ffff:192.168.0.12"}) {
+        expect("相手: 私的な範囲", isLanAddress(lan));
+    }
+    for (const char* wan : {"8.8.8.8", "172.15.0.1", "172.32.0.1", "192.169.0.1", "100.63.0.1", "100.128.0.1", "127.0.0.1",
+                            "0.0.0.0", "2001:db8::1", "fec0::1", "::1", "::ffff:8.8.8.8", "", "x", "192.168.0"}) {
+        expect("相手: 私的でない範囲は使わない", !isLanAddress(wan));
+    }
+    const std::string udp6 = head +
+        "  200: 00000000000000000000000000000000:A000 0000000000000000FFFF00000C00A8C0:6987 01 00000000:00000000 00:00000000 "
+        "00000000  1000        0 55555 2 0000000000000000 0\n"
+        "  201: 00000000000000000000000000000000:A001 00000000000000000000000001000000:6987 01 00000000:00000000 00:00000000 "
+        "00000000  1000        0 66666 2 0000000000000000 0\n";
+    expect("相手: IPv4 を写した IPv6 は IPv4 にする", findConnectedUdpPeer(udp6, {55555}, ip) && ip == "192.168.0.12");
+    expect("相手: IPv6 のループバック（::1）は使わない", !findConnectedUdpPeer(udp6, {66666}, ip));
+    expect("相手: 壊れた行は飛ばす", !findConnectedUdpPeer(head + "  1: zz 01\n", {}, ip));
+
+    // 実際に送る: 127.0.0.1 で待ち、1 と 0 の 2 つが届くか
+    const int receiver = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t length = sizeof(addr);
+    const bool bound = receiver >= 0 && ::bind(receiver, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0 &&
+                       ::getsockname(receiver, reinterpret_cast<sockaddr*>(&addr), &length) == 0;
+    timeval timeout {};
+    timeout.tv_sec = 2;
+    if (bound) ::setsockopt(receiver, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    SendOscCommand local;
+    local.autoHost = false;
+    local.host = "127.0.0.1";
+    local.port = ntohs(addr.sin_port);
+    local.address = "/input/Voice";
+    const SendOscResult sent = bound ? sendOscPress(local, 10) : SendOscResult();
+    char buffer[64];
+    const ssize_t first = bound ? ::recv(receiver, buffer, sizeof(buffer), 0) : -1;
+    const std::string one = first > 0 ? std::string(buffer, static_cast<size_t>(first)) : std::string();
+    const ssize_t second = bound ? ::recv(receiver, buffer, sizeof(buffer), 0) : -1;
+    const std::string zero = second > 0 ? std::string(buffer, static_cast<size_t>(second)) : std::string();
+    expect("送る: 1 を送ってから 0 を送る", sent.ok && one == encodeOscInt("/input/Voice", 1) &&
+                                              zero == encodeOscInt("/input/Voice", 0));
+    if (receiver >= 0) ::close(receiver);
+}
+
+/** コマンド: argv の分け方・フォルダ・消す・保存・並び。 */
+void testCommands() {
+    const std::string home = std::getenv("HOME") != nullptr ? std::getenv("HOME") : "";
+    std::vector<std::string> argv;
+    std::string error;
+    expect("コマンド: 空白で区切る", splitCommandLine("  wpctl  set-mute\t@DEFAULT_AUDIO_SINK@ toggle ", argv, error) &&
+                                       argv == std::vector<std::string>({"wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"}));
+    expect("コマンド: \"…\" でまとめる（中の \\\" と \\\\）",
+           splitCommandLine(R"(notify-send "aux の ボタン" "a\"b\\c" x"y z"w)", argv, error) &&
+               argv == std::vector<std::string>({"notify-send", "aux の ボタン", "a\"b\\c", "xy zw"}));
+    expect("コマンド: 空の \"\" も 1 つの引数", splitCommandLine("echo \"\" x", argv, error) &&
+                                                  argv == std::vector<std::string>({"echo", "", "x"}));
+    expect("コマンド: 先頭の ~/ はホームに広げる（\"…\" の中は広げない）",
+           splitCommandLine("~/bin/a.sh ~/x \"~/y\" a~/b ~", argv, error) &&
+               argv == std::vector<std::string>({home + "/bin/a.sh", home + "/x", "~/y", "a~/b", "~"}));
+    expect("コマンド: \" が閉じていなければ読めない", !splitCommandLine("echo \"abc", argv, error) && !error.empty());
+    expect("コマンド: 空なら argv も空", splitCommandLine("   ", argv, error) && argv.empty());
+    const std::vector<std::string> tricky = {"/bin/echo", "空白 あり", "", "q\"uote", "back\\slash", "~/literal", "plain"};
+    expect("コマンド: 文字列にして戻すと同じ",
+           splitCommandLine(joinCommandLine(tricky), argv, error) && argv == tricky);
+    expect("コマンド: 文字列の形", joinCommandLine({"wpctl", "set-volume", "a b"}) == "wpctl set-volume \"a b\"");
+
+    // ふだんのログ（ジャーナル・状態ファイル）にコマンドの中身を残さない（FRAME_AUX_DEBUG=1 のときだけ argv）
+    const std::vector<std::string> secretArgv = {"curl", "-H", "Authorization: Bearer SECRET123"};
+    const std::string quietDetail = commandLogDetail("通知", "c1", secretArgv, true, "", false);
+    expect("コマンドのログ: ふだんは名前と id と引数の数だけ",
+           quietDetail.find("SECRET123") == std::string::npos && quietDetail.find("curl") == std::string::npos &&
+               quietDetail.find("id c1") != std::string::npos && quietDetail.find("引数 3 個") != std::string::npos);
+    expect("コマンドのログ: debug のときだけ argv を足す",
+           commandLogDetail("通知", "c1", secretArgv, true, "", true).find("SECRET123") != std::string::npos);
+    expect("コマンドのログ: 起動できないときも中身は出さない",
+           commandLogDetail("通知", "c1", secretArgv, false, "exec: No such file or directory", false).find("SECRET123") ==
+               std::string::npos);
+    const std::string quietTry = tryCommandLogLine("id c1", secretArgv, true, "", false);
+    expect("［試す］のログ: ふだんは中身を出さない",
+           quietTry.find("SECRET123") == std::string::npos && quietTry.find("id c1") != std::string::npos);
+    expect("［試す］のログ: debug のときだけ argv を足す",
+           tryCommandLogLine("id c1", secretArgv, true, "", true).find("SECRET123") != std::string::npos);
+
+    // フォルダの実行ファイル
+    char base[] = "/tmp/fas-cmd-test-XXXXXX";
+    const std::string dir = mkdtemp(base) != nullptr ? base : "/tmp/fas-cmd-test";
+    const auto touch = [&](const std::string& name, mode_t mode) {
+        const std::string path = dir + "/" + name;
+        FILE* f = std::fopen(path.c_str(), "w");
+        if (f != nullptr) {
+            std::fputs("#!/bin/sh\n", f);
+            std::fclose(f);
+        }
+        chmod(path.c_str(), mode);
+    };
+    touch("zeta.sh", 0755);
+    touch("alpha", 0755);
+    touch("notexec.sh", 0644);
+    touch(".hidden.sh", 0755);
+    mkdir((dir + "/subdir").c_str(), 0755);
+    const std::vector<CommandDef> folder = scanCommandFolder(dir);
+    expect("フォルダ: 実行できる通常のファイルだけ（隠しファイル・フォルダ・実行できないものは除く）、名前の順",
+           folder.size() == 2 && folder[0].name == "alpha" && folder[1].name == "zeta");
+    expect("フォルダ: id は dir:<ファイル名>、名前は拡張子を除く、argv はフルパス",
+           folder.size() == 2 && folder[1].id == "dir:zeta.sh" && folder[1].argv == std::vector<std::string>({dir + "/zeta.sh"}) &&
+               folder[1].fromFolder);
+    expect("フォルダ: 無いフォルダなら空", scanCommandFolder(dir + "/nothing").empty());
+    expect("フォルダ: 設定ファイルの隣の commands/", commandFolderFor("/home/u/.config/frame-aux-shortcuts/config.json") ==
+                                                       "/home/u/.config/frame-aux-shortcuts/commands");
+    for (const char* name : {"zeta.sh", "alpha", "notexec.sh", ".hidden.sh"}) std::remove((dir + "/" + name).c_str());
+    rmdir((dir + "/subdir").c_str());
+    rmdir(dir.c_str());
+
+    // version 2 から: 同じ argv は 1 つのコマンドにまとめる
+    {
+        Config config;
+        std::vector<std::string> warnings;
+        parseConfigText(R"({ "version": 2, "actions": {
+            "press_1": { "type": "command", "argv": ["/usr/bin/a", "x"] },
+            "press_2": { "type": "command", "argv": ["/usr/bin/a", "x"] },
+            "long_press": { "type": "command", "argv": ["b"] } } })", config, warnings, error);
+        expect("設定 v2→3: 同じ argv は同じコマンド、違うものは別のコマンド",
+               config.commands.size() == 2 && config.press[0].commandId == config.press[1].commandId &&
+                   config.longPress.commandId != config.press[0].commandId && config.commands[0].name == "a");
+    }
+    {
+        Config config;
+        std::vector<std::string> warnings;
+        parseConfigText(R"({ "version": 3, "commands": [ { "id": "c1", "name": "A", "argv": ["a"] },
+            { "id": "c1", "name": "dup", "argv": ["b"] }, { "id": "dir:x", "name": "bad", "argv": ["c"] },
+            { "id": "c2", "name": "empty", "argv": [] } ],
+            "actions": { "press_1": { "type": "command", "command": "c1" }, "press_2": { "type": "command" } } })",
+                        config, warnings, error);
+        expect("設定 v3: 重なる id・dir: の id・空の argv は読み飛ばす", config.commands.size() == 1 && warnings.size() >= 3);
+        expect("設定 v3: command の id で割り当て、id の無いものは none",
+               config.press[0].commandId == "c1" && config.press[1].type == ActionType::None);
+    }
+
+    // 消す・保存する
+    {
+        Config config;
+        config.commands = {{"c1", "A", {"a"}, false}, {"c2", "B", {"b"}, false}};
+        config.commandOrder = {"c2", "c1"};
+        config.press[0] = {ActionType::Command, "c1"};
+        config.longPress = {ActionType::Command, "c1"};
+        config.press[1] = {ActionType::Command, "c2"};
+        expect("消す: 消したコマンドを割り当てていた押し方は none",
+               removeCommand(config, "c1") && config.press[0].type == ActionType::None &&
+                   config.longPress.type == ActionType::None && config.press[1].commandId == "c2" &&
+                   config.commands.size() == 1 && config.commandOrder == std::vector<std::string>({"c2"}));
+        expect("消す: 無い id は何もしない", !removeCommand(config, "c9"));
+        std::string id;
+        expect("保存: 足すと空いている一番小さい id", saveCommand(config, "", "  新しい  ", "echo \"a b\"", id, error) &&
+                                                        id == "c1" && config.commands.back().name == "新しい" &&
+                                                        config.commands.back().argv == std::vector<std::string>({"echo", "a b"}));
+        expect("保存: 書き換え", saveCommand(config, "c2", "B2", "true", id, error) && id == "c2" &&
+                                   config.commands[0].name == "B2" && config.commands[0].argv == std::vector<std::string>({"true"}));
+        expect("保存: 名前が空なら保存しない", !saveCommand(config, "", "  ", "true", id, error));
+        expect("保存: コマンドが空なら保存しない", !saveCommand(config, "", "x", "   ", id, error));
+        expect("保存: \" が閉じていなければ保存しない", !saveCommand(config, "", "x", "echo \"a", id, error));
+        expect("保存: 無い id は書き換えない", !saveCommand(config, "c9", "x", "true", id, error));
+        expect("id: 使っていない一番小さい番号", nextCommandId({{"c1", "", {"a"}, false}, {"c3", "", {"a"}, false}}) == "c2");
+    }
+
+    // 並び（フォルダの分も id で）
+    {
+        Config config;
+        config.commands = {{"c1", "A", {"a"}, false}, {"c2", "B", {"b"}, false}, {"c3", "C", {"c"}, false}};
+        const std::vector<CommandDef> folder = {{"dir:f1", "f1", {"/x/f1"}, true}, {"dir:f2", "f2", {"/x/f2"}, true}};
+        const auto ids = [](const std::vector<CommandDef>& list) {
+            std::string out;
+            for (const auto& c : list) out += c.id + " ";
+            return out;
+        };
+        expect("並び: 並びが無ければ設定の順、続けてフォルダ", ids(orderedCommands(config, folder)) == "c1 c2 c3 dir:f1 dir:f2 ");
+        config.commandOrder = {"dir:f2", "c3", "gone", "c1"};
+        expect("並び: 並びの順、無い id は飛ばし、並びに無いものは後ろ（フォルダの新しいものは最後）",
+               ids(orderedCommands(config, folder)) == "dir:f2 c3 c1 c2 dir:f1 ");
+        expect("並び替え: 新しい並びを id で書き、設定の commands も並べ直す",
+               setCommandOrder(config, folder, {"c2", "dir:f1", "c1"}) &&
+                   config.commandOrder == std::vector<std::string>({"c2", "dir:f1", "c1", "c3", "dir:f2"}) &&
+                   config.commands[0].id == "c2" && config.commands[1].id == "c1" && config.commands[2].id == "c3");
+        expect("並び替え: 同じ並びなら変わらない", !setCommandOrder(config, folder, config.commandOrder));
+    }
+}
+
+/** SteamVR のキーボード（Minimal）から 1 文字ずつ届く入力の組み立て。 */
+void testKeyboardText() {
+    KeyboardText k;
+    k.reset("ab");
+    expect("キーボード: 初期値から始め、入力位置は末尾", k.text() == "ab" && k.cursor() == 2);
+    k.feed("c");
+    expect("キーボード: ASCII を足す", k.text() == "abc");
+    const std::string a = "あ";  // e3 81 82
+    k.feed(a.substr(0, 1).c_str());
+    expect("キーボード: UTF-8 の途中のバイトはまだ出さない", k.text() == "abc");
+    k.feed(a.substr(1).c_str());
+    expect("キーボード: イベントをまたいだ UTF-8 を組み立てる", k.text() == "abcあ");
+    k.feed("\xe3\x81\x84\xe3\x81");  // い と、う の途中
+    expect("キーボード: 1 つのイベントに 1 文字半", k.text() == "abcあい");
+    k.feed("\x86x");
+    expect("キーボード: 残りのバイトで完成させて続ける", k.text() == "abcあいうx");
+    k.feed("\b");
+    k.feed("\b");
+    expect("キーボード: \\b は UTF-8 の 1 文字ぶん消す", k.text() == "abcあい" && k.cursor() == k.text().size());
+    k.feed("\xf0\x9f");  // 絵文字の途中
+    k.feed("\b");
+    expect("キーボード: 組み立て途中の \\b は途中のバイトだけ捨てる", k.text() == "abcあい");
+    k.feed("\x1b[D");
+    expect("キーボード: 左の矢印で 3 バイトの文字を 1 つ戻る", k.text() == "abcあい" && k.cursor() == 6);
+    k.feed("\x1b[");
+    k.feed("Cz");
+    expect("キーボード: イベントをまたいだ右の矢印で末尾に戻って足す", k.text() == "abcあいz");
+    expect("キーボード: \\n は完了（文字は入れない）", k.feed("\n") && k.text() == "abcあいz");
+    expect("キーボード: 完了でなければ false", !k.feed("q"));
+
+    KeyboardText m;
+    m.reset("aあいb");  // a(1) あ(3) い(3) b(1) = 8 バイト
+    m.feed("\x1b[D\x1b[D");
+    expect("入力位置: 左を 2 回で い の前", m.cursor() == 4);
+    m.feed("X");
+    expect("入力位置: 文字は入力位置に差し込む", m.text() == "aあXいb" && m.cursor() == 5);
+    m.feed("\b");
+    m.feed("\b");
+    expect("入力位置: 途中の \\b は入力位置の前の 1 文字を消す（3 バイトの文字も）", m.text() == "aいb" && m.cursor() == 1);
+    m.feed("\x1b[3~");
+    expect("入力位置: Delete（ESC [ 3 ~）は後ろの 1 文字を消す", m.text() == "ab" && m.cursor() == 1);
+    m.feed("\x1b[H");
+    expect("入力位置: Home（ESC [ H）で先頭", m.cursor() == 0);
+    m.feed("\x1b[D\b");
+    expect("入力位置: 先頭では左も \\b も何もしない", m.cursor() == 0 && m.text() == "ab");
+    m.feed("\x1b[F");
+    expect("入力位置: End（ESC [ F）で末尾", m.cursor() == 2);
+    m.feed("\x1b[C\x1b[3~");
+    expect("入力位置: 末尾では右も Delete も何もしない", m.cursor() == 2 && m.text() == "ab");
+    m.feed("\x1b[1~");
+    expect("入力位置: ESC [ 1 ~ も先頭", m.cursor() == 0);
+    m.feed("\x1b[4~");
+    expect("入力位置: ESC [ 4 ~ も末尾", m.cursor() == 2);
+    m.feed("\x1b");
+    m.feed("[");
+    m.feed("3");
+    m.feed("~");
+    expect("入力位置: 1 バイトずつ届いたエスケープも組み立てる（ここは末尾なので何も消えない）", m.text() == "ab");
+    m.feed("\x1b[A\x1b[B");
+    expect("入力位置: 上下の矢印は無視", m.cursor() == 2 && m.text() == "ab");
+    m.feed("\x1b" "c");
+    expect("入力位置: ESC だけのあとの文字はふつうに入る", m.text() == "abc");
+    m.reset("日本語");
+    m.setCursor(4);  // 本 の途中
+    expect("入力位置: 文字の途中を指したら、その文字の先頭に寄せる", m.cursor() == 3);
+    m.setCursor(100);
+    expect("入力位置: 末尾より後ろは末尾", m.cursor() == 9);
+    m.setCursor(0);
+    m.feed("\x1b[C\x1b[C");
+    expect("入力位置: 右で 3 バイトの文字を 1 つずつ進む", m.cursor() == 6);
+
+    KeyboardText reopen;
+    reopen.reset("abcdef");  // 直前の Closed で確定した文字から開き直す
+    reopen.setCursor(3);       // 押した位置
+    reopen.feed("X");
+    expect("開き直し: 前の文字を初期値にして、押した位置から差し込む", reopen.text() == "abcXdef" && reopen.cursor() == 4);
+
+    KeyboardText e;
+    e.reset("");
+    e.feed("\b");
+    expect("キーボード: 空で \\b しても空のまま", e.text().empty());
+    const char eight[8] = {'1', '2', '3', '4', '5', '6', '7', '8'};
+    e.feed(eight, 8);
+    expect("キーボード: NUL が無くても 8 バイトまでしか読まない", e.text() == "12345678");
+    KeyboardText broken;
+    broken.reset("");
+    broken.feed("\xe3\x81" "A");
+    expect("キーボード: 途中で新しい文字が来たら、途中のバイトは捨てる", broken.text() == "A");
+    expect("キーボード: 16 進のログ", hexBytes("\xe3\x81") == "e3 81" && hexBytes("") == "(空)");
+
+    // ふだんのログに打った中身を残さない（FRAME_AUX_KEYBOARD_DEBUG=1 のときだけ 16 進）
+    const char secretInput[8] = {'p', 'w', '9', 0, 0, 0, 0, 0};
+    const std::string quietLine =
+        keyboardEventLogLine("オーバーレイ", "KeyboardCharInput", 1201, 0, 5, 256, secretInput, sizeof(secretInput), false);
+    const std::string debugLine =
+        keyboardEventLogLine("オーバーレイ", "KeyboardCharInput", 1201, 0, 5, 256, secretInput, sizeof(secretInput), true);
+    expect("キーボードのログ: ふだんはバイト数だけで、中身（文字も 16 進も）は出さない",
+           quietLine.find("入力 3 バイト") != std::string::npos && quietLine.find("pw9") == std::string::npos &&
+               quietLine.find("70 77 39") == std::string::npos && quietLine.find("cNewInput") == std::string::npos);
+    expect("キーボードのログ: debug のときだけ 16 進を足す", debugLine.find("cNewInput=70 77 39") != std::string::npos);
+    const char fullInput[8] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};  // NUL で終わらない 8 バイト
+    expect("キーボードのログ: 8 バイトいっぱいでも読みすぎない",
+           keyboardEventLogLine("全体", "KeyboardCharInput", 1201, 0, 5, 0, fullInput, sizeof(fullInput), false)
+                   .find("入力 8 バイト") != std::string::npos);
+}
+
+/** 設定パネル: 操作の反映と、描いた位置での当たり判定。 */
+void testPanel() {
+    using K = PanelAction::Kind;
+    {
+        Config config;
+        expect("パネル: 4 回押しに none を割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::None), 3}, config) &&
+                   config.press[3].type == ActionType::None);
+        expect("パネル: どのコマンドかが無ければ command は割り当てない",
+               !applyPanelAction({K::Assign, static_cast<int>(ActionType::Command), 3}, config));
+        expect("パネル: コマンドを割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::Command), 0, "c2"}, config) &&
+                   config.press[0].type == ActionType::Command && config.press[0].commandId == "c2");
+        applyPanelAction({K::Assign, static_cast<int>(ActionType::MicMuteToggle), 0}, config);
+        expect("パネル: ほかのアクションにすると id は消える", config.press[0].commandId.empty());
+        expect("パネル: 長押しにも割り当てられる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::Screenshot), kLongPressSlot}, config) &&
+                   config.longPress.type == ActionType::Screenshot);
+    }
+    {
+        Config config;
+        applyPanelAction({K::LevelInc, 0, 0}, config);
+        applyPanelAction({K::LevelInc, 0, 0}, config);
+        expect("パネル: 明るさの段を ＋（5 刻み）", config.brightnessLevels[0] == 110);
+        for (int i = 0; i < 10; ++i) applyPanelAction({K::LevelInc, 0, 0}, config);
+        expect("パネル: 明るさは 125 まで", config.brightnessLevels[0] == 125);
+        for (int i = 0; i < 10; ++i) applyPanelAction({K::LevelDec, 2, 0}, config);
+        expect("パネル: 明るさは 40 から", config.brightnessLevels[2] == 40);
+        expect("パネル: 段を足す（最後の段 −20、40 より下にしない）",
+               applyPanelAction({K::LevelAdd, 0, 0}, config) && config.brightnessLevels.size() == 4 &&
+                   config.brightnessLevels[3] == 40);
+        expect("パネル: 4 段より多くは足さない", !applyPanelAction({K::LevelAdd, 0, 0}, config));
+        applyPanelAction({K::LevelRemove, 3, 0}, config);
+        applyPanelAction({K::LevelRemove, 2, 0}, config);
+        expect("パネル: 2 段より少なくは消さない",
+               config.brightnessLevels.size() == 2 && !applyPanelAction({K::LevelRemove, 0, 0}, config));
+    }
+    {
+        Config config;
+        applyPanelAction({K::LongInc, 0, 0}, config);
+        expect("パネル: 長押しは 0.1 秒刻み", config.longPressMs == 700);
+        for (int i = 0; i < 20; ++i) applyPanelAction({K::LongInc, 0, 0}, config);
+        expect("パネル: 長押しは 1.5 秒まで", config.longPressMs == 1500);
+        applyPanelAction({K::GapDec, 0, 0}, config);
+        expect("パネル: 回数の区切りは 0.05 秒刻み", config.multiPressGapMs == 300);
+        for (int i = 0; i < 20; ++i) applyPanelAction({K::GapDec, 0, 0}, config);
+        expect("パネル: 回数の区切りは 0.2 秒から", config.multiPressGapMs == 200);
+        config.language = Language::En;
+        config.runInBackground = false;
+        expect("パネル: すべて既定に戻す（言語は残す）",
+               applyPanelAction({K::ResetAll, 0, 0}, config) && config.longPressMs == 600 && config.runInBackground &&
+                   config.language == Language::En);
+    }
+
+    // 描いた位置での当たり判定
+    FontSet fonts;
+    fonts.load("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc");
+    SettingsPanel panel(fonts);
+    Config config;
+    config.language = Language::Ja;
+    PanelView view;
+    view.daemon = PanelView::Daemon::Running;
+    panel.render(config, view);
+    double x = 0;
+    double y = 0;
+    expect("パネル: 3 回押しのカードがある", panel.buttonCenter({K::SelectSlot, 2, 0}, x, y));
+    panel.pointerDown(x, y, 0.0);
+    expect("パネル: カードを押すと選ばれる（呼び出し側には返さない）", panel.selectedSlot() == 2);
+    panel.render(config, view);
+    expect("パネル: 選んだカードに割り当てる選択肢がある",
+           panel.buttonCenter({K::Assign, static_cast<int>(ActionType::Screenshot), 2}, x, y));
+    const PanelAction assign = panel.pointerDown(x, y, 0.1);
+    expect("パネル: 選択肢を押すと割り当ての操作が返る",
+           assign == PanelAction({K::Assign, static_cast<int>(ActionType::Screenshot), 2}));
+    expect("パネル: 明るさのタブがある", panel.buttonCenter({K::Tab, static_cast<int>(PanelTab::Brightness), 0}, x, y));
+    panel.pointerDown(x, y, 0.2);
+    expect("パネル: タブを押すと切り替わる", panel.tab() == PanelTab::Brightness);
+    // すべてのタブ・日英で描ける（ボタンが画像の中にある）
+    bool inside = true;
+    for (const Language lang : {Language::Ja, Language::En}) {
+        config.language = lang;
+        for (int tab = 0; tab < kPanelTabCount; ++tab) {
+            panel.setTab(static_cast<PanelTab>(tab));
+            panel.render(config, view);
+        }
+    }
+    panel.setTab(PanelTab::App);
+    panel.render(config, view);
+    expect("パネル: 終了のボタンがある", panel.buttonCenter({K::Quit, 0, 0}, x, y) && x < SettingsPanel::kWidth &&
+                                          y < SettingsPanel::kHeight);
+    expect("パネル: 終了は 1 回目では返らない", panel.pointerDown(x, y, 1.0).kind == K::None);
+    expect("パネル: 3 秒以内の 2 回目で終了", panel.pointerDown(x, y, 2.0).kind == K::Quit);
+    expect("パネル: 3 秒を過ぎた 2 回目は確認からやり直し", [&] {
+        panel.pointerDown(x, y, 10.0);
+        return panel.pointerDown(x, y, 14.0).kind == K::None;
+    }());
+    expect("パネル: すべてのタブを日英で描ける", inside);
+
+    // アプリタブ: いっしょに使うアプリ・ささけんのアプリの一覧・Konsole で開く前の確認
+    {
+        using frame_apps::AppState;
+        frame_apps::ManagerConfig appsConfig;
+        appsConfig.self = "frame-aux-shortcuts";
+        appsConfig.related = {{"frame-perf-overlay", "パフォーマンス表示に使う", "perf"}, {"frame-jp-keyboard", "日本語", "jp"}};
+        appsConfig.fetch.cacheDir.clear();  // 取ってきた一覧は使わない（同梱の一覧で確かめる）
+        frame_apps::AppsManager apps(appsConfig);
+        apps.setForPreview({{"frame-perf-overlay", AppState::Missing},
+                            {"frame-jp-keyboard", AppState::Installed},
+                            {"frameeyeosc", AppState::Running},
+                            {"frame-mic-tuner", AppState::Installed}},
+                           {});
+        view.apps = apps.entries();
+        expect("アプリ: 自分は一覧に入らず、使うものが先", view.apps.size() == 4 && view.apps[0].app.key == "perf" &&
+                                                               view.apps[1].app.key == "keyboard" && view.apps[0].related);
+        config.language = Language::Ja;
+        panel.setTab(PanelTab::App);
+        panel.render(config, view);
+        expect("アプリ: 入っていない perf に［入れる］", panel.buttonCenter({K::AppInstall, 0, 0, "perf"}, x, y));
+        expect("アプリ: 入っている keyboard には［入れる］が無い", !panel.buttonCenter({K::AppInstall, 0, 0, "keyboard"}, x, y));
+        panel.buttonCenter({K::AppInstall, 0, 0, "perf"}, x, y);
+        expect("アプリ: ［入れる］はまず確認（呼び出し側には返さない）", panel.pointerDown(x, y, 30.0).kind == K::None);
+        panel.pointerUp();
+        panel.render(config, view);
+        expect("アプリ: 確認の下のボタンは押せない", !panel.buttonCenter({K::AppsOpenList, 0, 0, ""}, x, y) &&
+                                                         !panel.buttonCenter({K::Quit, 0, 0}, x, y));
+        expect("アプリ: 確認の［Konsole で開く］で呼び名が返る", panel.buttonCenter({K::AppsConfirmLaunch, 0, 0, ""}, x, y) &&
+                                                                  panel.pointerDown(x, y, 30.1) ==
+                                                                      PanelAction(K::AppsConfirmLaunch, 0, 0, "perf"));
+        panel.pointerUp();
+        panel.setAppsLaunchResult(frame_apps::LaunchResult::NoKonsole);
+        panel.render(config, view);
+        expect("アプリ: 開けなければ確認のまま", panel.buttonCenter({K::AppsConfirmLaunch, 0, 0, ""}, x, y));
+        panel.setAppsLaunchResult(frame_apps::LaunchResult::Started);
+        panel.render(config, view);
+        expect("アプリ: 開けたら確認を閉じる", !panel.buttonCenter({K::AppsConfirmLaunch, 0, 0, ""}, x, y) &&
+                                                   panel.buttonCenter({K::AppsOpenList, 0, 0, ""}, x, y));
+        panel.pointerDown(x, y, 31.0);
+        panel.pointerUp();
+        panel.render(config, view);
+        expect("アプリ: 一覧に ✕ と［インストーラーを開く］", panel.appsListOpen() &&
+                                                               panel.buttonCenter({K::AppsCloseList, 0, 0, ""}, x, y) &&
+                                                               panel.buttonCenter({K::AppsOpenMenu, 0, 0, ""}, x, y));
+        expect("アプリ: 一覧の中の［入れる］", panel.buttonCenter({K::AppInstall, 0, 0, "perf"}, x, y));
+        expect("アプリ: 4 個なら一覧はスクロールしない", !panel.scroll(-1.0));
+        panel.buttonCenter({K::AppsOpenMenu, 0, 0, ""}, x, y);
+        panel.pointerDown(x, y, 31.5);
+        panel.pointerUp();
+        panel.render(config, view);
+        expect("アプリ: メニューの確認は空の呼び名", panel.buttonCenter({K::AppsConfirmLaunch, 0, 0, ""}, x, y) &&
+                                                         panel.pointerDown(x, y, 31.6) == PanelAction(K::AppsConfirmLaunch, 0, 0, ""));
+        panel.pointerUp();
+        panel.render(config, view);
+        panel.buttonCenter({K::AppsConfirmCancel, 0, 0, ""}, x, y);
+        panel.pointerDown(x, y, 31.7);
+        panel.pointerUp();
+        panel.render(config, view);
+        expect("アプリ: やめたら一覧に戻る", panel.appsListOpen() && panel.buttonCenter({K::AppsCloseList, 0, 0, ""}, x, y));
+        view.menuBusy = true;
+        panel.render(config, view);
+        expect("アプリ: メニューの Konsole が開いている間は［インストーラーを開く］を押せない",
+               !panel.buttonCenter({K::AppsOpenMenu, 0, 0, ""}, x, y));
+        view.menuBusy = false;
+        for (const Language lang : {Language::Ja, Language::En}) {
+            config.language = lang;
+            panel.render(config, view);
+        }
+        config.language = Language::Ja;
+        panel.render(config, view);
+        panel.buttonCenter({K::Tab, static_cast<int>(PanelTab::Assign), 0}, x, y);
+        panel.pointerDown(x, y, 32.0);
+        panel.pointerUp();
+        expect("アプリ: タブを替えたら一覧を閉じる", !panel.appsListOpen());
+        panel.setTab(PanelTab::App);
+        panel.render(config, view);
+        expect("アプリ: 戻ったときは一覧を開く行", panel.buttonCenter({K::AppsOpenList, 0, 0, ""}, x, y));
+
+        // サイトにだけあるアプリ: 確認の画面の名前とコマンドは今の一覧から引き、Konsole に渡すのと同じ installerCommand
+        {
+            frame_apps::Entry site = view.apps[2];
+            site.app.name = "frame-example";
+            site.app.key = "example";
+            site.state = AppState::Missing;
+            view.apps.push_back(site);
+            panel.openAppsForPreview(true, "example", 0);
+            panel.render(config, view);
+            expect("アプリ: サイトにだけあるアプリの確認は install example",
+                   panel.appsConfirmEntry(view) != nullptr && panel.appsConfirmEntry(view)->app.name == "frame-example" &&
+                       panel.appsConfirmCommand(view) == frame_apps::installerCommand("example") &&
+                       panel.appsConfirmCommand(view) == "curl -fsSL https://frame.sasaken1102s.net | sh -s -- install example");
+            expect("アプリ: そのまま［Konsole で開く］で example が返る",
+                   panel.buttonCenter({K::AppsConfirmLaunch, 0, 0, ""}, x, y) &&
+                       panel.pointerDown(x, y, 50.0) == PanelAction(K::AppsConfirmLaunch, 0, 0, "example"));
+            panel.pointerUp();
+            view.apps.pop_back();  // 一覧から消えた
+            panel.render(config, view);
+            expect("アプリ: 一覧から消えた呼び名は開けない（画面はメニューのコマンド）",
+                   panel.appsConfirmEntry(view) == nullptr && panel.appsConfirmCommand(view) == frame_apps::installerCommand("") &&
+                       panel.buttonCenter({K::AppsConfirmLaunch, 0, 0, ""}, x, y) && panel.pointerDown(x, y, 50.5).kind == K::None);
+            panel.pointerUp();
+            panel.openAppsForPreview(false, "", 0);
+        }
+
+        // アプリが増えたら一覧はスクロールする（スティックと、地を押したまま動かす）
+        for (int i = 0; i < 6; ++i) {
+            frame_apps::Entry extra = view.apps[2];
+            extra.app.name = "frame-example-" + std::to_string(i);
+            view.apps.push_back(extra);
+        }
+        panel.openAppsForPreview(true, "", 0);
+        panel.render(config, view);
+        expect("アプリ: 10 個ならスティックでスクロールする", panel.scroll(-1.0));
+        expect("アプリ: 上へ戻せる", panel.scroll(5.0) && !panel.scroll(1.0));
+        expect("アプリ: 地を押したまま動かすとスクロール", [&] {
+            panel.render(config, view);
+            double dx = 0, dy = 0, dw = 0, dh = 0;
+            if (!panel.buttonBounds({K::AppsListDrag, 0, 0, ""}, dx, dy, dw, dh)) return false;
+            // 行の［入れる］が無い左の端（札のあたり）を押して上へ動かす
+            const double px = dx + 30;
+            const double py = dy + dh - 20;
+            if (panel.pointerDown(px, py, 40.0).kind != K::None) return false;
+            const bool moved = panel.pointerMove(px, py - 150);
+            panel.pointerUp();
+            return moved;
+        }());
+        expect("アプリ: 一覧の外に隠れた［入れる］は押せない", [&] {
+            panel.openAppsForPreview(true, "", 0);
+            panel.render(config, view);
+            double bx = 0, by = 0, bw = 0, bh = 0;
+            bool ok = true;
+            for (const frame_apps::Entry& entry : view.apps) {
+                if (panel.buttonBounds({K::AppInstall, 0, 0, entry.app.key}, bx, by, bw, bh)) ok = ok && by + bh <= 740;
+            }
+            return ok;
+        }());
+        view.apps.resize(4);
+        panel.openAppsForPreview(false, "", 0);
+    }
+
+    // コマンド: 割り当ての列・シート・並び替え
+    for (int i = 1; i <= 10; ++i) {
+        config.commands.push_back({"c" + std::to_string(i), "Cmd " + std::to_string(i), {"/bin/true"}, false});
+    }
+    config.press[4] = {ActionType::Command, "c9"};
+    config.language = Language::Ja;
+    panel.setTab(PanelTab::Assign);
+    panel.setSelectedSlot(4);
+    panel.render(config, view);
+    expect("パネル: コマンドを割り当てたカードを選ぶと、コマンドの側のそのページ（9 個目 → 2 ページ目）",
+           panel.buttonCenter({K::Assign, static_cast<int>(ActionType::Command), 4, "c9"}, x, y) &&
+               !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::Command), 4, "c1"}, x, y));
+    expect("パネル: 最後のページの最後に「＋ コマンドを足す」", panel.buttonCenter({K::AddCommand, 0, 0, ""}, x, y));
+    panel.pointerDown(x, y, 20.0);
+    expect("パネル: 「＋ コマンドを足す」でコマンドのタブの追加のシート", panel.tab() == PanelTab::Commands && panel.sheetOpen() &&
+                                                                     panel.sheetId().empty());
+    expect("プリセット: 追加のシートは「プリセットから」・VRChat のミュートで始まる",
+           panel.presetMode() && panel.preset() == CommandPreset::VrchatMute && panel.wantsPeer());
+    {
+        std::string name;
+        std::vector<std::string> argv;
+        expect("プリセット: VRChat のミュートは送り先を自動で登録する",
+               panel.presetCommand(Language::Ja, name, argv) && name == "VRChat のミュート（PC）" &&
+                   argv == std::vector<std::string>({"frame-aux-shortcuts", "--send-osc", "auto:9000", "/input/Voice"}));
+        panel.render(config, view);
+        expect("プリセット: 見つかった PC を見せる", panel.setDetectedPeer(true, "192.168.0.12") &&
+                                                       !panel.setDetectedPeer(true, "192.168.0.12"));
+        panel.render(config, view);
+        expect("プリセット: ［追加する］が押せる", panel.buttonCenter({K::PresetAdd, 0, 0, ""}, x, y) &&
+                                                     panel.pointerDown(x, y, 20.1).kind == K::PresetAdd);
+        expect("プリセット: ［試す］が押せる", panel.buttonCenter({K::PresetTest, 0, 0, ""}, x, y) &&
+                                                 panel.pointerDown(x, y, 20.2).kind == K::PresetTest);
+        expect("プリセット: 手で入れるに切り替えられる", panel.buttonCenter({K::OscDestManual, 0, 0, ""}, x, y) &&
+                                                           panel.pointerDown(x, y, 20.3).kind == K::None && !panel.wantsPeer());
+        panel.render(config, view);
+        expect("プリセット: IP が空なら追加できない", !panel.presetCommand(Language::Ja, name, argv) &&
+                                                        panel.buttonCenter({K::PresetAdd, 0, 0, ""}, x, y) &&
+                                                        panel.pointerDown(x, y, 20.4).kind == K::None);
+        expect("プリセット: IP の欄が見えて、押すと呼び出し側に返る",
+               panel.sheetFieldShown(SettingsPanel::kFieldIp) && !panel.sheetFieldShown(SettingsPanel::kFieldName) &&
+                   panel.buttonCenter({K::SheetIp, 0, 0, ""}, x, y) && panel.pointerDown(x, y, 20.5).kind == K::SheetIp);
+        panel.setSheetText(SettingsPanel::kFieldIp, "192.168.0.");
+        expect("プリセット: IP の形が違えば追加できない", !panel.presetCommand(Language::Ja, name, argv));
+        panel.setSheetText(SettingsPanel::kFieldIp, "192.168.0.12");
+        expect("プリセット: 手で入れた IP で登録する",
+               panel.presetCommand(Language::En, name, argv) && name == "VRChat mute (PC)" &&
+                   argv == std::vector<std::string>({"frame-aux-shortcuts", "--send-osc", "192.168.0.12:9000", "/input/Voice"}));
+        panel.render(config, view);
+        expect("プリセット: スピーカーのミュートを選べる", panel.buttonCenter({K::PresetPick, 1, 0, ""}, x, y) &&
+                                                             panel.pointerDown(x, y, 20.6).kind == K::None &&
+                                                             panel.preset() == CommandPreset::SpeakerMute);
+        expect("プリセット: スピーカーのミュートは wpctl",
+               panel.presetCommand(Language::Ja, name, argv) && name == "スピーカーのミュート" &&
+                   argv == std::vector<std::string>({"wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"}) &&
+                   !panel.sheetFieldShown(SettingsPanel::kFieldIp));
+        panel.render(config, view);
+        expect("プリセット: 「自分で書く」に切り替えると名前の欄", panel.buttonCenter({K::SheetModeOwn, 0, 0, ""}, x, y) &&
+                                                                    panel.pointerDown(x, y, 20.7).kind == K::None &&
+                                                                    !panel.presetMode() &&
+                                                                    panel.sheetFieldShown(SettingsPanel::kFieldName));
+        for (const Language lang : {Language::Ja, Language::En}) {
+            Config c = config;
+            c.language = lang;
+            for (const bool presets : {true, false}) {
+                for (const CommandPreset preset : {CommandPreset::VrchatMute, CommandPreset::SpeakerMute}) {
+                    for (const bool autoDest : {true, false}) {
+                        panel.setPresetForPreview(presets, preset, autoDest);
+                        panel.render(c, view);
+                    }
+                }
+            }
+        }
+        panel.setPresetForPreview(false, CommandPreset::VrchatMute, true);
+    }
+    panel.render(config, view);
+    expect("パネル: 名前とコマンドが空なら保存できない",
+           panel.buttonCenter({K::SheetSave, 0, 0, ""}, x, y) && panel.pointerDown(x, y, 21.0).kind == K::None);
+    panel.setSheetText(0, "新しいコマンド");
+    panel.setSheetText(1, "echo hi");
+    panel.render(config, view);
+    panel.buttonCenter({K::SheetSave, 0, 0, ""}, x, y);
+    expect("パネル: 入れたら保存できる", panel.pointerDown(x, y, 22.0).kind == K::SheetSave);
+    panel.closeSheet();
+    panel.setSelectedSlot(1);
+    panel.setTab(PanelTab::Assign);
+    panel.render(config, view);
+    expect("パネル: アクションを割り当てたカードを選ぶと、アクションの側",
+           panel.buttonCenter({K::Assign, static_cast<int>(ActionType::BrightnessCycle), 1, ""}, x, y));
+    panel.setTab(PanelTab::Commands);
+    panel.render(config, view);
+    double gx = 0;
+    double gy = 0;
+    expect("パネル: 一覧の行につまみがある", panel.buttonCenter({K::Grip, 0, 0, "c1"}, gx, gy));
+    panel.pointerDown(gx, gy, 30.0);
+    expect("パネル: つまみを押すと並び替えの途中", panel.dragging());
+    panel.pointerMove(gx, gy + (SettingsPanel::kListRowH + SettingsPanel::kListRowGap) * 2);
+    panel.pointerUp();
+    std::vector<std::string> order;
+    expect("パネル: 2 行ぶん下へ動かして離すと、その並びが返る",
+           panel.takeReorder(order) && order.size() == 10 && order[0] == "c2" && order[1] == "c3" && order[2] == "c1");
+    expect("パネル: 返すのは 1 回だけ", !panel.takeReorder(order));
+    {
+        SettingsPanel caret(fonts);
+        expect("カーソル: 入力中の欄が無ければ点滅しない", !caret.caretTick(0.0));
+        caret.setActiveField(1);
+        caret.caretTick(10.0);
+        expect("カーソル: 0.53 秒で消える", !caret.caretTick(10.5) && caret.caretTick(10.6));
+        expect("カーソル: 次の 0.53 秒で点く", caret.caretTick(11.1));
+        caret.caretTick(11.7);  // 消えた
+        caret.setSheetText(1, "x");
+        expect("カーソル: 文字が入ったら点灯から始め直す", caret.caretTick(11.8) && !caret.caretTick(12.3));
+        caret.setActiveField(-1);
+        expect("カーソル: 閉じたら点滅しない", caret.activeField() == -1 && !caret.caretTick(20.0));
+    }
+    {
+        // 入力中の欄を押すと、押した位置に一番近い文字の境目へ入力位置を移す
+        SettingsPanel tap(fonts);
+        Config tapConfig;
+        tap.setTab(PanelTab::Commands);
+        tap.render(tapConfig, view);
+        tap.openSheet(nullptr);
+        tap.setPresetForPreview(false, CommandPreset::VrchatMute, true);  // 自分で書く
+        tap.setSheetText(0, "abcdef");
+        tap.setActiveField(0);
+        tap.render(tapConfig, view);
+        double fx = 0;
+        double fy = 0;
+        size_t at = 99;
+        double bx = 0;
+        double by = 0;
+        double bw = 0;
+        double bh = 0;
+        tap.buttonCenter({K::SheetName, 0, 0, ""}, fx, fy);
+        tap.buttonBounds({K::SheetName, 0, 0, ""}, bx, by, bw, bh);
+        const PanelAction tapped = tap.pointerDown(bx + 2, fy, 30.0);  // 欄の左端の少し右
+        expect("入力位置: 入力中の欄を押すと、押した位置を渡す", tapped.kind == K::SheetName && tap.takeTapCursor(at) && at == 0);
+        expect("入力位置: 開いた直後は末尾", [&] {
+            tap.setActiveField(0);
+            return tap.sheetCursor() == 6;
+        }());
+        // キーボードが閉じていても（押した瞬間に SteamVR が閉じても）、押した位置を求めて、そこから開き直せる
+        tap.setActiveField(-1);
+        tap.render(tapConfig, view);
+        expect("入力位置: 閉じている欄を押しても、押した位置を渡す（左端なら先頭）",
+               tap.pointerDown(bx + 2, fy, 31.0).kind == K::SheetName && tap.takeTapCursor(at) && at == 0);
+        expect("入力位置: 文字の右の空きを押したら末尾",
+               tap.pointerDown(fx + 300, fy, 32.0).kind == K::SheetName && tap.takeTapCursor(at) && at == 6);
+        tap.pointerDown(bx + 16 + 30, fy, 33.0);  // 先頭から 30px（abcdef の 19px の文字で 3 文字目のあたり）
+        expect("入力位置: 文字の途中を押したら、その近くの境目（先頭でも末尾でもない）", tap.takeTapCursor(at) && at > 0 && at < 6);
+        tap.setActiveField(0, at);
+        expect("入力位置: 押した位置で開き直す", tap.activeField() == 0 && tap.sheetCursor() == at);
+        tap.setActiveField(0, 100);
+        expect("入力位置: 文字より後ろを指したら末尾", tap.sheetCursor() == 6);
+        tap.setSheetText(1, "");
+        tap.render(tapConfig, view);
+        double cx = 0;
+        double cy = 0;
+        tap.buttonCenter({K::SheetCommand, 0, 0, ""}, cx, cy);
+        expect("入力位置: 空の欄を押したら末尾（0）",
+               tap.pointerDown(cx - 200, cy, 34.0).kind == K::SheetCommand && tap.takeTapCursor(at) && at == 0);
+    }
+    expect("パネル: スクロールで一覧が動く（10 個は入りきらない）", panel.scroll(-1.0));
+    expect("パネル: 一番上より上へは動かない", [&] {
+        panel.scroll(100.0);
+        return !panel.scroll(1.0);
+    }());
+}
+
+}  // namespace
+
+/**
+ * テストの入口。
+ * @return すべて合格なら 0、1 つでも不合格なら 1
+ */
+/** 実行時のフォルダ・設定ファイルの権限（ほかのユーザーのフォルダやリンクに書かない。設定は 0600）。 */
+void testPrivateFiles() {
+    char base[] = "/tmp/fas-private-test-XXXXXX";
+    if (mkdtemp(base) == nullptr) {
+        expect("権限: テスト用のフォルダを作れる", false);
+        return;
+    }
+    const std::string root = base;
+    const uid_t me = ::getuid();
+    std::string reason;
+
+    const std::string good = root + "/good";
+    expect("予備の置き場所: 新しく作ると 0700 で使える", ensurePrivateDir(good, reason));
+    struct stat st {};
+    expect("予備の置き場所: 作ったフォルダは 0700", ::lstat(good.c_str(), &st) == 0 && (st.st_mode & 0777) == 0700);
+    expect("予備の置き場所: 持ち主がほかのユーザーなら使わない", !checkPrivateDir(good, me + 1, reason));
+
+    const std::string link = root + "/link";
+    const bool linked = ::symlink(good.c_str(), link.c_str()) == 0;
+    expect("予備の置き場所: シンボリックリンクなら使わない", linked && !ensurePrivateDir(link, reason));
+    std::string error;
+    expect("予備の置き場所: リンクの先には状態ファイルを書かない",
+           !writeFileAtomically(link + "/status.json", "{}", error) && ::access((good + "/status.json").c_str(), F_OK) != 0);
+
+    const std::string openDir = root + "/open";
+    ::mkdir(openDir.c_str(), 0700);
+    ::chmod(openDir.c_str(), 0755);
+    expect("予備の置き場所: ほかのユーザーにも権限があれば使わない", !ensurePrivateDir(openDir, reason));
+
+    const std::string file = root + "/file";
+    expect("予備の置き場所: フォルダでなければ使わない",
+           writeFilePrivately(file, "x", error) && !ensurePrivateDir(file, reason));
+
+    // ロックファイル: リンクは開かない
+    const std::string lockLink = good + "/x.lock";
+    const bool lockLinked = ::symlink(file.c_str(), lockLink.c_str()) == 0;
+    const int lockFd = openPrivateFile(lockLink, reason);
+    expect("ロック: シンボリックリンクは開かない", lockLinked && lockFd < 0);
+    if (lockFd >= 0) ::close(lockFd);
+    const int realLock = openPrivateFile(good + "/real.lock", reason);
+    expect("ロック: 新しいロックファイルは 0600",
+           realLock >= 0 && ::fstat(realLock, &st) == 0 && (st.st_mode & 0777) == 0600);
+    if (realLock >= 0) ::close(realLock);
+
+    expect("状態ファイル: 書けて 0600",
+           writeFileAtomically(good + "/status.json", "{}", error) && ::stat((good + "/status.json").c_str(), &st) == 0 &&
+               (st.st_mode & 0777) == 0600);
+
+    // 設定ファイル: 0600 で保存（前が 0644 でも 0600 に）。新しく作るフォルダは 0700
+    const std::string configPath = root + "/config/frame-aux-shortcuts/config.json";
+    Config config;
+    expect("設定: 保存できる", saveConfig(configPath, config, error));
+    expect("設定: 保存したファイルは 0600", ::stat(configPath.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    expect("設定: 新しく作ったフォルダは 0700",
+           ::stat((root + "/config/frame-aux-shortcuts").c_str(), &st) == 0 && (st.st_mode & 0777) == 0700);
+    ::chmod(configPath.c_str(), 0644);
+    expect("設定: 前が 0644 でも、保存すると 0600",
+           saveConfig(configPath, config, error) && ::stat(configPath.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    std::string text;
+    expect("設定: 中身が読める", readTextFile(configPath, text) && text.find("\"version\"") != std::string::npos);
+
+    const std::string cleanup = "rm -rf '" + root + "'";
+    const int rc = std::system(cleanup.c_str());
+    (void)rc;
+}
+
+/** 最後に選んだタブ: 名前の読み書き・ファイルの権限・壊れたファイル・リンク。 */
+void testPanelState() {
+    bool roundTrip = true;
+    for (int i = 0; i < kPanelTabCount; ++i) {
+        PanelTab tab = PanelTab::Assign;
+        if (!parsePanelTab(panelTabName(static_cast<PanelTab>(i)), tab) || tab != static_cast<PanelTab>(i)) roundTrip = false;
+    }
+    PanelTab tab = PanelTab::App;
+    expect("タブ: 名前と行き来できる", roundTrip && parsePanelTab("commands", tab) && tab == PanelTab::Commands);
+    expect("タブ: 知らない名前は読まない", !parsePanelTab("bogus", tab) && !parsePanelTab("", tab) && tab == PanelTab::Commands);
+
+    char base[] = "/tmp/fas-state-test-XXXXXX";
+    if (mkdtemp(base) == nullptr) {
+        expect("タブ: テスト用のフォルダを作れる", false);
+        return;
+    }
+    const std::string root = base;
+    const std::string path = root + "/state/frame-aux-shortcuts/panel.json";
+    std::string error;
+    std::string name;
+    struct stat st {};
+    expect("タブ: 無ければ読めない", !loadPanelTab(path, name));
+    expect("タブ: 書ける（親のフォルダも作る）", savePanelTab(path, "commands", error));
+    expect("タブ: 書いたものを読める", loadPanelTab(path, name) && name == "commands");
+    expect("タブ: ファイルは 0600", ::stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    expect("タブ: フォルダは 0700", ::stat((root + "/state/frame-aux-shortcuts").c_str(), &st) == 0 &&
+                                         (st.st_mode & 0777) == 0700 && ::stat((root + "/state").c_str(), &st) == 0 &&
+                                         (st.st_mode & 0777) == 0700);
+    expect("タブ: 書き換えられる", savePanelTab(path, "app", error) && loadPanelTab(path, name) && name == "app");
+    expect("タブ: 使えない文字の名前は書かない", !savePanelTab(path, "../x", error) && loadPanelTab(path, name) && name == "app");
+    writeFilePrivately(path, "{ broken", error);
+    expect("タブ: 壊れたファイルは読まない", !loadPanelTab(path, name));
+    writeFilePrivately(path, "{\"tab\": \"app\"}" + std::string(kMaxPanelStateBytes, ' '), error);
+    expect("タブ: 大きすぎるファイルは読まない", !loadPanelTab(path, name));
+    expect("タブ: パスが空なら読まない・書かない", !loadPanelTab("", name) && !savePanelTab("", "app", error));
+    {
+        const char* oldHome = std::getenv("HOME");
+        const std::string savedHome = oldHome != nullptr ? oldHome : "";
+        const char* oldState = std::getenv("XDG_STATE_HOME");
+        const std::string savedState = oldState != nullptr ? oldState : "";
+        ::unsetenv("XDG_STATE_HOME");
+        ::unsetenv("HOME");
+        const bool emptyWithoutHome = panelStatePath().empty();
+        ::setenv("HOME", "relative", 1);
+        const bool emptyRelative = panelStatePath().empty();
+        if (oldHome != nullptr) ::setenv("HOME", savedHome.c_str(), 1);
+        if (oldState != nullptr) ::setenv("XDG_STATE_HOME", savedState.c_str(), 1);
+        expect("タブ: HOME が無い・相対なら覚えない", emptyWithoutHome && emptyRelative);
+    }
+    const std::string target = root + "/other.json";
+    writeFilePrivately(target, "{\"tab\": \"press\"}", error);
+    ::unlink(path.c_str());
+    const bool linked = ::symlink(target.c_str(), path.c_str()) == 0;
+    expect("タブ: シンボリックリンクは読まない", linked && !loadPanelTab(path, name));
+    expect("タブ: シンボリックリンクの先には書かない（置き換える）",
+           savePanelTab(path, "assign", error) && ::lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+               loadPanelTab(target, name) && name == "press");
+    ::mkdir((root + "/state2").c_str(), 0700);
+    ::mkdir((root + "/elsewhere").c_str(), 0700);
+    const bool dirLinked = ::symlink((root + "/elsewhere").c_str(), (root + "/state2/frame-aux-shortcuts").c_str()) == 0;
+    expect("タブ: アプリのフォルダがシンボリックリンクなら書かない",
+           dirLinked && !savePanelTab(root + "/state2/frame-aux-shortcuts/panel.json", "assign", error) &&
+               ::access((root + "/elsewhere/panel.json").c_str(), F_OK) != 0);
+    const std::string cleanup = "rm -rf '" + root + "'";
+    const int rc = std::system(cleanup.c_str());
+    (void)rc;
+}
+
+int main() {
+    testPressDetector();
+    testBrightness();
+    testConfig();
+    testStatus();
+    testParsers();
+    testTextAndHud();
+    testCommands();
+    testKeyboardText();
+    testPanel();
+    testPrivateFiles();
+    testOsc();
+    testPanelState();
+    std::printf("\n%d 件中 %d 件が合格\n", gTotal, gTotal - gFailures);
+    return gFailures == 0 ? 0 : 1;
+}

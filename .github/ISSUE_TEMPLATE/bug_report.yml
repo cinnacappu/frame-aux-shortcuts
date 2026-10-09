@@ -1,0 +1,64 @@
+name: Bug report / 不具合の報告
+description: Something doesn't work as expected. / 思ったとおりに動かないとき
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! English or Japanese is fine. / 報告ありがとう！英語でも日本語でも大丈夫です。
+        **If the aux button stopped working entirely** (not even the dashboard opens), run `~/.local/bin/frame-aux-shortcuts --restore` on the Frame, or restart the headset. That puts the button back.
+        **aux ボタンがまったく効かなくなったときは**（ダッシュボードも開かない）、Frame で `~/.local/bin/frame-aux-shortcuts --restore` を実行するか、本体を再起動してください。ボタンが元に戻ります。
+        Logs may contain IP addresses on your home network and the names of your commands. Feel free to replace them with `x.x.x.x` etc.
+        ログには家のネットワークの IP アドレスや、登録したコマンドの名前が入ることがあります。気になるときは `x.x.x.x` などに書き換えてください。
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / 何が起きたか
+      description: What you did (which press, which action), what you expected, and what happened instead (a screenshot helps). / 何をしたら（何回押し・どのアクション）、どうなるはずが、どうなったか（スクリーンショットがあると助かります）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / 版
+      description: Shown in the bar at the top of the App tab of "aux Shortcuts" in the SteamVR dashboard, or run `~/.local/bin/frame-aux-shortcuts --version` on the Frame. / SteamVR ダッシュボードの「aux ショートカット」のアプリのタブの上の帯、または Frame で `~/.local/bin/frame-aux-shortcuts --version`
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: item
+    attributes:
+      label: What goes wrong / うまくいかないもの
+      multiple: true
+      options:
+        - Presses aren't recognized or are miscounted / 押し方が分からない・数え間違える
+        - aux doesn't come back after quitting / 終わっても aux が元に戻らない
+        - Mic mute / マイクのミュート
+        - Brightness / 明るさ
+        - Passthrough / パススルー
+        - Screenshot / スクリーンショット
+        - Perf overlay (frame-perf-overlay) / パフォーマンス表示（frame-perf-overlay）
+        - Dashboard / ダッシュボード
+        - Commands / コマンド
+        - Keyboard input in the panel / パネルでのキーボードの入力
+        - Notices or the muted indicator in your view / 視界のお知らせ・ミュート中の表示
+        - Sound on press / 押したときの音
+        - Settings panel / 設定パネル
+        - Autostart / 自動起動
+        - Updates / 更新
+        - Something else / そのほか
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / ログ
+      description: |
+        Run this on the Frame (Desktop Mode terminal or ssh) soon after the problem, and paste the output.
+        問題が起きたあとすぐに Frame で（デスクトップモードの端末か ssh で）次を実行して、出てきた内容を貼ってください。
+        `journalctl --user -u frame-aux-shortcuts -u frame-aux-shortcuts-panel --since "1 hour ago" --no-pager`
+        If it's about updates, also / 更新のことなら、これも: `cat ~/.cache/frame-aux-shortcuts/update.log`
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else / そのほか
+      description: Your settings if you changed any (`~/.config/frame-aux-shortcuts/config.json`; remove anything private from your commands), the output of `~/.local/bin/frame-aux-shortcuts --show-keymap`, what was running at the time, etc. / 変えた設定（`~/.config/frame-aux-shortcuts/config.json`。コマンドに人に見せたくないものがあれば消してください）、`~/.local/bin/frame-aux-shortcuts --show-keymap` の出力、そのとき動かしていたアプリなど

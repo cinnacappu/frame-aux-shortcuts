@@ -1,0 +1,19 @@
+[Unit]
+Description=Frame Aux Shortcuts panel (SteamVR dashboard settings for the aux button shortcuts)
+# OpenVR のオーバーレイなので SteamVR が動いている間だけ動かす
+After=steamvr.service
+PartOf=steamvr.service
+
+[Service]
+ExecStart=%h/.local/bin/frame-aux-shortcuts-panel
+# SteamVR だけ再起動したとき（steamvr.service は動いたまま）も戻ってくるよう、正常終了でも再起動する。
+# steamvr.service が止まるときは PartOf で一緒に止まるので再起動はされない
+Restart=always
+RestartSec=5
+# 「終了」・ダッシュボードのアイコンの「閉じる」・すでに別のパネルが動いているときは終了コード 3。
+# ユーザーが閉じたので起動し直さない。失敗扱いにもしない
+RestartPreventExitStatus=3
+SuccessExitStatus=3
+
+[Install]
+WantedBy=steamvr.service

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Frame Aux Shortcuts
+Name[ja]=aux ショートカット
+Comment=Shortcuts on the Steam Frame aux button. Opens its settings in the SteamVR dashboard.
+Comment[ja]=Steam Frame の aux ボタンのショートカット。SteamVR のダッシュボードに設定パネルを出す
+# 次の Exec の値は、インストールのときに設定パネルの実行ファイルの絶対パスに置き換える（Steam から起動されると PATH に ~/.local/bin が無いことがある）
+Exec=@BINARY@
+Icon=frame-aux-shortcuts
+Terminal=false
+Categories=Utility;

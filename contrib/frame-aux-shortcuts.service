@@ -1,0 +1,20 @@
+[Unit]
+Description=Frame Aux Shortcuts (aux button shortcuts for Steam Frame)
+# OpenVR を使うので SteamVR が動いている間だけ動かす
+After=steamvr.service
+PartOf=steamvr.service
+
+[Service]
+# 設定は ~/.config/frame-aux-shortcuts/config.json（無ければ既定値）。設定パネルは frame-aux-shortcuts-panel.service
+ExecStart=%h/.local/bin/frame-aux-shortcuts
+# SteamVR だけ再起動したとき（steamvr.service は動いたまま）も戻ってくるよう、正常終了でも再起動する。
+# steamvr.service が止まるときは PartOf で一緒に止まるので再起動はされない
+Restart=always
+RestartSec=5
+# 終了コード 3: すでに別の常駐がいる・gpio-keys や aux ボタンが無い・設定パネルの「終了」で終わった。
+# 起動し直さない。失敗（failed）扱いにもしない
+RestartPreventExitStatus=3
+SuccessExitStatus=3
+
+[Install]
+WantedBy=steamvr.service

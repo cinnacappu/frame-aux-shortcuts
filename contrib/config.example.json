@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "long_press_ms": 600,
+  "multi_press_gap_ms": 350,
+  "brightness_levels": [100, 60, 40],
+  "sound": { "enabled": true, "success": "/opt/steamvr/resources/webinterface/dashboard/sounds/deck_ui_misc_10.wav", "failure": "/opt/steamvr/resources/webinterface/dashboard/sounds/activation_change_fail.wav" },
+  "hud": { "enabled": true, "mute_badge": true },
+  "screenshot_dir": "~/Pictures/frame-aux-shortcuts",
+  "screenshot_to_steam": true,
+  "run_in_background": true,
+  "language": "ja",
+  "update_check": true,
+  "commands": [
+    { "id": "c1", "name": "スピーカーのミュート", "argv": ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"] }
+  ],
+  "command_order": [],
+  "actions": {
+    "press_1": { "type": "mic_mute_toggle" },
+    "press_2": { "type": "brightness_cycle" },
+    "press_3": { "type": "room_view_toggle" },
+    "press_4": { "type": "screenshot" },
+    "press_5": { "type": "perf_overlay_toggle" },
+    "long_press": { "type": "dashboard_open" }
+  }
+}

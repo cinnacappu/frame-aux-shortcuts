@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- frame-aux-shortcuts のアイコン。寸法は黄金比（φ ≒ 1.618）で決めた:
+     ボタンの外形は横 : 縦 = φ : 1、ピンクの面の高さ = 外形の高さ ÷ φ、白い輪の太さ : すき間 = φ : 1、
+     点の直径 = ピンクの面までの余白、長押しの棒 = 点の φ² 倍、上の余白 : 絵と文字の間 = φ : 1。
+     角の丸み・文字・色は frame-perf-overlay・frame-mic-tuner・frameeyeosc のアイコンにそろえた。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+  </defs>
+  <rect x="4" y="4" width="248" height="248" rx="46" fill="#0e1015" stroke="#2c3039" stroke-width="2"/>
+  <rect x="69.45" y="45.6" width="117.1" height="58.5" rx="29.25" fill="#e07ef5" opacity="0.5" filter="url(#glow)"/>
+  <rect x="56.95" y="33.1" width="142.1" height="83.5" rx="41.75" fill="none" stroke="#f2f3f5" stroke-width="11.2"/>
+  <rect x="69.45" y="45.6" width="117.1" height="58.5" rx="29.25" fill="#e07ef5"/>
+  <circle cx="65.95" cy="160.55" r="9.05" fill="#e07ef5"/>
+  <circle cx="95.25" cy="160.55" r="9.05" fill="#e07ef5"/>
+  <circle cx="124.55" cy="160.55" r="9.05" fill="#e07ef5"/>
+  <rect x="151.7" y="151.5" width="47.4" height="18.1" rx="9.05" fill="#f2f3f5"/>
+  <text x="128" y="228.6" text-anchor="middle" font-family="Noto Sans CJK JP" font-weight="700" font-size="58" fill="#f2f3f5">Aux</text>
+</svg>
