@@ -84,6 +84,7 @@ struct PanelAction {
         UpdateRetry,       ///< 呼び出し側で扱う
         UpdateDismiss,     ///< 呼び出し側で扱う
         PickerActions,     ///< 割り当ての列をアクションの側に（パネルの中だけで扱う）
+        PickerMedia,       ///< 割り当ての列を音楽の側に（パネルの中だけで扱う）
         PickerCommands,    ///< 割り当ての列をコマンドの側に（パネルの中だけで扱う）
         PickerPrev,        ///< コマンドの側の前のページ（パネルの中だけで扱う）
         PickerNext,        ///< コマンドの側の次のページ（パネルの中だけで扱う）
@@ -167,6 +168,8 @@ bool applyPanelAction(const PanelAction& action, Config& config);
  */
 class SettingsPanel {
 public:
+    /** 割り当ての列の側（アクション・音楽・コマンド）。 */
+    enum class PickerSide { Actions, Media, Commands };
     /** 画像の大きさ（px）。 */
     static constexpr int kWidth = 1200;
     static constexpr int kHeight = 740;
@@ -411,7 +414,7 @@ public:
     /** 見た目の確認用: コマンドの「消す」の 2 回目を待つ状態にする。 */
     void armDeleteForPreview(const std::string& id);
     /** 見た目の確認用: 割り当ての列の側とページを決める（自動で決めない）。 */
-    void setPickerForPreview(bool commands, int page);
+    void setPickerForPreview(PickerSide side, int page);
     /** 見た目の確認用: コマンドのタブの一覧のスクロール（px。大きければ一番下）。 */
     void setListScrollForPreview(double px) { listScroll_ = px; }
     /**
@@ -533,7 +536,7 @@ private:
     bool resetArmed_ = false;
     double resetArmedUntil_ = 0.0;
     bool updateConfirmArmed_ = false;
-    bool pickerCommands_ = false;     ///< 割り当ての列がコマンドの側か
+    PickerSide pickerSide_ = PickerSide::Actions;  ///< 割り当ての列の側
     int pickerPage_ = 0;              ///< コマンドの側のページ
     bool autoPicker_ = true;          ///< 次に描くとき、選んだカードの割り当てに合わせて側とページを決める
     int pickerPageCount_ = 1;         ///< 最後に描いたときのコマンドの側のページ数

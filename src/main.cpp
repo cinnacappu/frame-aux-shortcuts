@@ -6,6 +6,8 @@
 // 設定の run_in_background が false なら、設定パネル（frame-aux-shortcuts-panel）が動いている間だけ置き換える。
 // 設定の original_aux_on_head_pointer が true なら、SteamVR がヘッドセットのカーソルで操作している間（コントローラーが無い間）は
 // 置き換えをやめて aux を SteamVR に返す（カーソルのクリックに使えるように）。
+// タップ（設定の actions.tap_2 / tap_3）に割り当てがあれば、ヘッドセットをかぶっている間だけ、ヘッドセットの姿勢を
+// 250 Hz で読んで 2 回・3 回タップを判定する（tap_detector.h）。割り当てが無ければ姿勢は読まない（250 Hz で起きない）。
 // 状態（最後の押し方・ミュート・明るさなど）は $XDG_RUNTIME_DIR/frame-aux-shortcuts/status.json に書き、設定パネルが読む。
 // sudo は使わない（steamos は input グループなので /dev/input/event* を読み書きできる）。
 #include "action_worker.h"
@@ -26,6 +28,7 @@
 #include "runtime.h"
 #include "sound.h"
 #include "status.h"
+#include "tap_detector.h"
 #include "theme.h"
 #include "vr_client.h"
 
@@ -74,7 +77,8 @@ constexpr int64_t kConfigCheckMs = 1000;  ///< 設定ファイルの変更を確
 constexpr int64_t kPanelCheckMs = 500;    ///< 設定パネルが動いているかを確かめる間隔（run_in_background が false のとき）
 constexpr int64_t kSampleMs = 1000;       ///< 明るさ・パススルーを読む間隔
 constexpr int64_t kAppsCheckMs = 2000;    ///< frame-perf-overlay の状態を読む間隔
-constexpr int64_t kPointerPollMs = 500;   ///< カーソルの判定に使う値（コントローラーの数など）を読む間隔
+constexpr int64_t kPointerPollMs = 500;   ///< カーソルの判定に使う値（コントローラーの数など）・ヘッドセットをかぶっているかを読む間隔
+constexpr int64_t kTapSampleMs = kTapSamplePeriodUs / 1000;  ///< タップの判定のために姿勢を読む間隔（かぶっていて、タップを使う間だけ）
 constexpr int kMicFastMs = 1000;          ///< ミュートを読む間隔（ミュート中の表示か設定パネルが要るとき）
 constexpr int kMicSlowMs = 5000;          ///< ミュートを読む間隔（それ以外）
 
@@ -118,6 +122,16 @@ int64_t nowMs() {
     return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
 
+/**
+ * 単調増加の時計で今の時刻を µs で返す（タップの判定の角加速度に使う。ms では 4 ms おきの差が粗すぎる）。
+ * @return µs
+ */
+int64_t nowUs() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+}
+
 /** 使い方を表示する。 */
 void printUsage() {
     std::printf(
@@ -127,8 +141,10 @@ void printUsage() {
         "  --show-keymap        キー対応表を読んで表示するだけで終わる（書き換えない）\n"
         "  --test-action TYPE   アクションを 1 回だけ実行して終わる（キー対応表は触らない）\n"
         "                       TYPE: mic_mute_toggle / brightness_cycle / room_view_toggle / screenshot /\n"
-        "                             perf_overlay_toggle / dashboard_open / original_aux / command / none\n"
+        "                             perf_overlay_toggle / dashboard_open / recenter / original_aux /\n"
+        "                             media_play_pause / media_next / media_previous / command / none\n"
         "                       （command は設定の割り当てのうち最初のもののコマンドを使う）\n"
+        "                       （recenter はヘッドセットをかぶっていなければ何もせずに失敗する）\n"
         "  --send-osc TARGET ADDRESS  OSC の ADDRESS に 1 を送り、0.15 秒後に 0 を送って終わる（ボタンを押して離す）。\n"
         "                       TARGET: auto:9000（Steam Link でつないでいる PC）か <IPv4>:<ポート>。\n"
         "                       例: --send-osc auto:9000 /input/Voice（VRChat のミュートの切り替え）\n"
@@ -401,6 +417,8 @@ int runDumpHud(const Options& options) {
         bool ok;
         const char* value;
         const char* reason;
+        bool tap = false;  ///< ヘッドセットのタップ（count に回数）
+        const char* track = "";  ///< 音楽の操作の曲名
     };
     const Sample samples[] = {
         {"mic-muted", 1, ActionType::MicMuteToggle, true, "muted", ""},
@@ -416,18 +434,35 @@ int runDumpHud(const Options& options) {
         {"original-aux-failed", 1, ActionType::OriginalAux, false, "", "failed"},
         {"vrchat-mute", 2, ActionType::Command, true, "osc:/input/Voice", ""},
         {"vrchat-mute-nopc", 2, ActionType::Command, false, "osc:/input/Voice", "no_pc"},
+        {"tap2-passthrough-on", 2, ActionType::RoomViewToggle, true, "on", "", true},
+        {"tap3-screenshot", 3, ActionType::Screenshot, true, "/tmp/x.png", "", true},
+        {"media-paused", 1, ActionType::MediaPlayPause, true, "paused", "", false, "アトラクトライト / *Luna - Covered by しほ"},
+        {"media-playing", 1, ActionType::MediaPlayPause, true, "playing", "", false, "Never Gonna Give You Up"},
+        {"media-next", 2, ActionType::MediaNext, true, "next", "", false,
+         "【歌ってみた】とても長い曲名のときに視界のお知らせの幅を超えたら末尾を省略できるかを確かめるための曲名 / 歌い手の名前 - Official Music Video"},
+        {"media-next-notitle", 2, ActionType::MediaNext, true, "next", "", false, ""},
+        {"media-previous-tap", 2, ActionType::MediaPrevious, true, "previous", "", true, "Bohemian Rhapsody (Remastered 2011)"},
+        {"media-noplayer", 1, ActionType::MediaPlayPause, false, "", "no_player", false, ""},
+        {"media-unsupported", 0, ActionType::MediaNext, false, "", "media_unsupported", false, ""},
+        {"recenter", 0, ActionType::Recenter, true, "recentered", ""},
+        {"recenter-tap", 2, ActionType::Recenter, true, "recentered", "", true},
+        {"recenter-notworn", 0, ActionType::Recenter, false, "", "not_worn"},
+        {"recenter-nottracking", 1, ActionType::Recenter, false, "", "not_tracking"},
     };
     int written = 0;
     for (const Language lang : {Language::Ja, Language::En}) {
         const std::string suffix = lang == Language::Ja ? "ja" : "en";
         for (const Sample& sample : samples) {
             PressRecord press;
-            press.kind = sample.count == 0 ? PressRecord::Kind::Long : PressRecord::Kind::Count;
+            press.kind = sample.tap           ? PressRecord::Kind::Tap
+                         : sample.count == 0 ? PressRecord::Kind::Long
+                                             : PressRecord::Kind::Count;
             press.count = sample.count;
             press.action = sample.action;
             press.ok = sample.ok;
             press.value = sample.value;
             press.reason = sample.reason;
+            press.track = sample.track;
             HudToast toast;
             if (!makeHudToast(press, lang, toast)) continue;
             renderer.renderToast(toast);
@@ -483,6 +518,7 @@ public:
      */
     Daemon(const Config& config, int wakeFd) : config_(config), detector_(detectorParams(config)), hud_(fonts_) {
         fonts_.load(kFontRegular, kFontBold);
+        tap_.setFireDoubleImmediately(config_.tap[1].type == ActionType::None);
         status_.version = FRAME_AUX_SHORTCUTS_VERSION;
         status_.pid = static_cast<int>(::getpid());
         worker_.start(wakeFd);
@@ -503,6 +539,8 @@ public:
 
     /** @return 押し方の判定 */
     PressDetector& detector() { return detector_; }
+    /** @return ヘッドセットのタップの判定 */
+    TapDetector& tapDetector() { return tap_; }
     /** @return 今の設定 */
     Config& config() { return config_; }
     /** @return SteamVR とのつながり */
@@ -572,6 +610,8 @@ public:
     /** 設定が変わったときに呼ぶ（判定の時間・ミュート中の表示の言語やオン・オフ）。 */
     void onConfigChanged() {
         detector_.setParams(detectorParams(config_));
+        // 3 回タップに何も割り当てていなければ、2 回目のタップでその場で 2 回タップにする（3 回目を待たない）
+        tap_.setFireDoubleImmediately(config_.tap[1].type == ActionType::None);
         badgeLanguage_ = -1;  // 言語が変わっていれば描き直す
         updateBadge();
     }
@@ -595,40 +635,25 @@ public:
         const bool longPress = result.kind == PressResult::Kind::LongPress;
         record.kind = longPress ? PressRecord::Kind::Long : PressRecord::Kind::Count;
         const Action& action = longPress ? config_.longPress : config_.press[result.count - 1];
-        record.action = action.type;
-        const std::string label = (longPress ? std::string("長押し") : std::to_string(result.count) + " 回押し") +
-                                  " → " + actionTypeName(action.type);
-        if (action.type == ActionType::None) {
-            std::fprintf(stderr, "[押し方] %s（何もしません）\n", label.c_str());
-            status_.lastPress = record;
-            writeStatus();
+        const std::string name = longPress ? std::string("長押し") : std::to_string(result.count) + " 回押し";
+        runAssigned("押し方", name, action, record);
+    }
+
+    /**
+     * 確定したヘッドセットのタップに割り当てたアクションを動かす。
+     * @param result 判定の結果（2 回・3 回でなければ、ログに出すだけ）
+     */
+    void handleTap(const TapResult& result) {
+        if (result.taps == 0) return;
+        if (!result.fired()) {
+            std::fprintf(stderr, "[タップ] %d 回（2 回・3 回でないので何もしません）\n", result.taps);
             return;
         }
-        std::fprintf(stderr, "[押し方] %s\n", label.c_str());
-        if (action.type == ActionType::Screenshot) {
-            // お知らせとミュート中の表示を写さない: 隠して、コンポジターが隠した画面を出すまで待ってから頼む
-            overlay_.hideToast();
-            if (badgeShown_) {
-                overlay_.setBadge(nullptr);
-                badgeShown_ = false;
-                ::usleep(kBadgeHideWaitMs * 1000);
-            }
-            takingScreenshot_ = true;
-        }
-        PreparedAction prepared = prepareAction(action, config_, vr_);
-        takingScreenshot_ = false;
-        if (prepared.screenshot) {
-            // 結果（音・お知らせ・状態ファイル）は、撮れたイベントが来てから出す（お知らせが写り込まないように）
-            pendingShots_.push_back(
-                {label, record, prepared.shot, nowMs() + static_cast<int64_t>(kScreenshotTimeoutSec * 1000)});
-            return;
-        }
-        if (!prepared.done) {
-            worker_.post(label, record, std::move(prepared.deferred));
-            return;
-        }
-        finish(label, record, prepared.outcome);
-        updateBadge();  // 頼めずに終わったスクリーンショットのあと、ミュート中なら出し直す
+        PressRecord record;
+        record.at = static_cast<long long>(std::time(nullptr));
+        record.kind = PressRecord::Kind::Tap;
+        record.count = result.taps;
+        runAssigned("タップ", std::to_string(result.taps) + " 回タップ", config_.tap[result.taps - 2], record);
     }
 
     /** 作業用スレッドで終わったアクションの結果を受け取る。 */
@@ -754,6 +779,49 @@ public:
 
 private:
     /**
+     * 押し方・タップに割り当てたアクションを動かす（結果は音・視界の表示・状態ファイルに出す）。
+     * @param tag ログの見出し（"押し方" / "タップ"）
+     * @param name ログ用の押し方の名前（"2 回押し" など）
+     * @param action 割り当て
+     * @param record 押し方（種類・回数・時刻を入れたもの）
+     */
+    void runAssigned(const char* tag, const std::string& name, const Action& action, PressRecord record) {
+        record.action = action.type;
+        const std::string label = name + " → " + actionTypeName(action.type);
+        if (action.type == ActionType::None) {
+            std::fprintf(stderr, "[%s] %s（何もしません）\n", tag, label.c_str());
+            status_.lastPress = record;
+            writeStatus();
+            return;
+        }
+        std::fprintf(stderr, "[%s] %s\n", tag, label.c_str());
+        if (action.type == ActionType::Screenshot) {
+            // お知らせとミュート中の表示を写さない: 隠して、コンポジターが隠した画面を出すまで待ってから頼む
+            overlay_.hideToast();
+            if (badgeShown_) {
+                overlay_.setBadge(nullptr);
+                badgeShown_ = false;
+                ::usleep(kBadgeHideWaitMs * 1000);
+            }
+            takingScreenshot_ = true;
+        }
+        PreparedAction prepared = prepareAction(action, config_, vr_);
+        takingScreenshot_ = false;
+        if (prepared.screenshot) {
+            // 結果（音・お知らせ・状態ファイル）は、撮れたイベントが来てから出す（お知らせが写り込まないように）
+            pendingShots_.push_back(
+                {label, record, prepared.shot, nowMs() + static_cast<int64_t>(kScreenshotTimeoutSec * 1000)});
+            return;
+        }
+        if (!prepared.done) {
+            worker_.post(label, record, std::move(prepared.deferred));
+            return;
+        }
+        finish(label, record, prepared.outcome);
+        updateBadge();  // 頼めずに終わったスクリーンショットのあと、ミュート中なら出し直す
+    }
+
+    /**
      * アクションの結果を反映する（ログ・音・視界の表示・状態ファイル）。
      * @param label ログ用の名前
      * @param record 押し方
@@ -767,6 +835,7 @@ private:
         record.value = outcome.value;
         record.reason = outcome.reason;
         record.detail = outcome.detail;
+        record.track = outcome.track;
         status_.lastPress = record;
         if (outcome.ok) {
             // 結果で分かった状態はすぐ反映する（見張りの次の読み取りを待たない）
@@ -809,6 +878,7 @@ private:
 
     Config config_;
     PressDetector detector_;
+    TapDetector tap_;  ///< ヘッドセットのタップの判定
     FontSet fonts_;
     HudRenderer hud_;
     HudOverlay overlay_;
@@ -990,6 +1060,27 @@ int runDaemon(const Options& options) {
     int64_t nextSample = 0;
     int64_t nextApps = 0;
     int64_t nextPointer = 0;
+    // タップ: 割り当てがあり、ショートカットを使っていて、ヘッドセットをかぶっている間だけ姿勢を読む（kTapSampleMs おき）
+    bool tapPolling = false;
+    int64_t nextTapSample = 0;
+    /** 姿勢を読むか（タップの判定をするか）を、割り当て・aux の扱い・かぶっているかに合わせる。 */
+    const auto updateTapPolling = [&]() {
+        // 割り当てが無ければ OpenVR にも聞かない（タップを使わない人には何も増えない）
+        const char* reason = !daemon.config().tapsAssigned() ? "タップに割り当てが無い"
+                             : !(active || handedBack)       ? "ショートカットを使っていない"
+                             : !daemon.vr().hmdInUse()        ? "ヘッドセットをかぶっていない"
+                                                              : nullptr;
+        const bool want = reason == nullptr;
+        if (want == tapPolling) return;
+        tapPolling = want;
+        daemon.tapDetector().reset();
+        nextTapSample = nowMs();
+        if (want) {
+            std::fprintf(stderr, "[タップ] ヘッドセットの姿勢を読み始めます（%lld ms おき）\n", static_cast<long long>(kTapSampleMs));
+        } else {
+            std::fprintf(stderr, "[タップ] ヘッドセットの姿勢を読むのをやめます（%s）\n", reason);
+        }
+    };
     std::fprintf(stderr, "[起動] aux ボタンを待ちます（長押し %d ms・回数の区切り %d ms）\n", daemon.config().longPressMs,
                  daemon.config().multiPressGapMs);
 
@@ -1058,7 +1149,15 @@ int runDaemon(const Options& options) {
                     break;
                 }
             }
+            updateTapPolling();
             nextPointer = now + kPointerPollMs;
+        }
+        if (tapPolling && now >= nextTapSample) {
+            // 読めない（追跡が外れた）ときは飛ばす。間が空いたことは判定の側で分かる
+            double w[3] = {0, 0, 0};
+            if (vr.readHmdAngularVelocity(w)) daemon.handleTap(daemon.tapDetector().onSample(nowUs(), w[0], w[1], w[2]));
+            nextTapSample += kTapSampleMs;
+            if (nextTapSample <= now) nextTapSample = now + kTapSampleMs;  // 遅れたら今から数え直す
         }
         if (now >= nextSample) {
             daemon.sampleVr();
@@ -1085,6 +1184,7 @@ int runDaemon(const Options& options) {
         if (deadline >= 0) wakeAt = std::min(wakeAt, deadline);
         const int64_t hudAt = daemon.nextHudTickMs();
         if (hudAt >= 0) wakeAt = std::min(wakeAt, hudAt);
+        if (tapPolling) wakeAt = std::min(wakeAt, nextTapSample);
         const int64_t waitMs = std::max<int64_t>(0, wakeAt - now);
         struct timespec timeout {};
         timeout.tv_sec = static_cast<time_t>(waitMs / 1000);

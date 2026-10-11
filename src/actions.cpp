@@ -1,7 +1,9 @@
 // アクションの実行の実装。
 // 書き込むのは: PipeWire のミュート（wpctl）、SteamVR の設定（IVRSettings）、frame-perf-overlay へのシグナル、
 // SteamVR へのメールボックスの送信、スクリーンショットの保存先のフォルダ（PNG は vrcompositor が書く）、
-// 組み込みのコマンドの OSC（つないでいる PC への UDP）、aux の元の動きの入力（gpio-keys への write。keymap.h）だけ。
+// 組み込みのコマンドの OSC（つないでいる PC への UDP）、aux の元の動きの入力（gpio-keys への write。keymap.h）、
+// 音楽・動画のアプリへの MPRIS のメソッドの呼び出し（セッションバス。media_control.h）、
+// 視点のリセットの頼み（IVRChaperone::ResetZeroPose。ファイルは書かない）だけ。
 // sysfs・/opt・/etc には触らない。PipeWire・WirePlumber の再起動もしない。トラッキング用のカメラも開かない。
 #include "actions.h"
 
@@ -9,7 +11,9 @@
 #include "command.h"
 #include "commands.h"
 #include "keymap.h"
+#include "media_control.h"
 #include "osc.h"
+#include "recenter.h"
 #include "room_view.h"
 #include "runtime.h"
 #include "screenshot.h"
@@ -27,6 +31,16 @@
 #include <ctime>
 
 namespace {
+
+/**
+ * 単調増加の時刻（ms）。視点のリセットの間引きに使う。
+ * @return 時刻
+ */
+int64_t monotonicMs() {
+    timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
 
 /**
  * 数値を短い文字列にする（ログ用）。
@@ -203,6 +217,46 @@ void prepareScreenshot(VrClient& vr, const std::string& dir, PreparedAction& out
 }
 
 /**
+ * 視点をリセットする（今向いている方を正面にする）。かぶっていて姿勢が取れているときだけ。
+ * 前のリセットから 1 秒たっていなければ、し直さずに成功にする（うっかり 2 回動かさない）。
+ * OpenVR を使うのでメインスレッドで呼ぶ（関所もメインスレッドだけで使う）。
+ * @param vr SteamVR とのつながり
+ * @return 結果
+ */
+ActionOutcome recenter(VrClient& vr) {
+    static RecenterGate gate;
+    RecenterState state;
+    state.connected = vr.connected();
+    state.hmdInUse = state.connected && vr.hmdInUse();
+    state.hmdTracking = state.hmdInUse && vr.hmdTracking();
+    const int64_t now = monotonicMs();
+    const RecenterDecision decision = gate.decide(state, now);
+    switch (decision) {
+        case RecenterDecision::NoSteamVr: return failure(recenterFailureReason(decision), "SteamVR につながっていません");
+        case RecenterDecision::NotWorn:
+            return failure(recenterFailureReason(decision), "ヘッドセットをかぶっていないので、視点をリセットしません");
+        case RecenterDecision::NotTracking:
+            return failure(recenterFailureReason(decision), "ヘッドセットの姿勢が取れていないので、視点をリセットしません");
+        case RecenterDecision::Repeated: {
+            ActionOutcome out;
+            out.ok = true;
+            out.value = kRecenterRepeated;
+            out.detail = "1 秒以内の 2 回目なので、視点はリセットし直しません";
+            return out;
+        }
+        case RecenterDecision::Reset: break;
+    }
+    std::string error;
+    if (!vr.resetZeroPose(error)) return failure("failed", "視点をリセットできません: " + error);
+    gate.markReset(now);
+    ActionOutcome out;
+    out.ok = true;
+    out.value = kRecentered;
+    out.detail = "視点をリセットしました（ResetZeroPose: Standing・Seated）";
+    return out;
+}
+
+/**
  * VR 用のファイル（Mono では書かれないはず）が書かれていたら消す。
  * @param shot 頼んだもの
  */
@@ -262,6 +316,10 @@ PreparedAction prepareAction(const Action& action, const Config& config, VrClien
             out.outcome.detail = out.outcome.ok ? "ダッシュボードを開くよう頼みました" : "ダッシュボードを開けません: " + error;
             break;
         }
+        case ActionType::Recenter:
+            out.done = true;
+            out.outcome = recenter(vr);
+            break;
         case ActionType::OriginalAux: {
             // 置き換えの一時的な戻しがあるので、メインスレッド（置き換え・戻しと同じスレッド）でその場で行う（約 80 ms 止まる）
             out.done = true;
@@ -269,6 +327,14 @@ PreparedAction prepareAction(const Action& action, const Config& config, VrClien
             out.outcome.ok = keymap_guard::pressOriginal(message);
             if (!out.outcome.ok) out.outcome.reason = "failed";
             out.outcome.detail = "aux の元の動き: " + message;
+            break;
+        }
+        case ActionType::MediaPlayPause:
+        case ActionType::MediaNext:
+        case ActionType::MediaPrevious: {
+            // D-Bus の呼び出し（と、次の曲の曲名を待つ間）でメインループを止めないよう、作業用スレッドで動かす
+            const ActionType type = action.type;
+            out.deferred = [type]() { return runMediaAction(type); };
             break;
         }
         case ActionType::Command: {

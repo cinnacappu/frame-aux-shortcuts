@@ -65,6 +65,18 @@ for lang in ja en; do
     shot "panel-$lang-assign-perf-missing" --language "$lang" --tab assign --slot 4 --preview-perf missing
     shot "panel-$lang-assign-unmuted" --language "$lang" --tab assign --preview-unmuted --slot 3
     shot "panel-$lang-assign-daemon-stopped" --language "$lang" --tab assign --preview-daemon stopped
+    # 割り当て: ヘッドセットのタップ（見本の割り当て・さっき 2 回タップ。2 回タップのカードを選ぶ・コマンドの側も）
+    shot "panel-$lang-assign-taps" --language "$lang" --tab assign --preview-taps --slot 6
+    shot "panel-$lang-assign-taps-tap3" --language "$lang" --tab assign --preview-taps --slot 7 --preview-commands 3
+    # 割り当て: 音楽の操作（1 回押し・4 回押し・2 回タップに割り当てて、音楽の側。アクションの側も）
+    shot "panel-$lang-assign-media" --language "$lang" --tab assign --preview-media --slot 0 --preview-commands 3
+    shot "panel-$lang-assign-media-next" --language "$lang" --tab assign --preview-media --slot 3
+    shot "panel-$lang-assign-media-actions" --language "$lang" --tab assign --preview-media --slot 0 --preview-picker actions
+    shot "panel-$lang-assign-media-tap" --language "$lang" --tab assign --preview-media --slot 6 --preview-commands 12
+    # 割り当て: 視点のリセット（長押し・2 回タップに割り当てて、長押しのカードを選ぶ）と、アクションの側の
+    # 入っていない frame-perf-overlay（選んでいない・選んだ。5 列の幅で名前の下に札）
+    shot "panel-$lang-assign-recenter" --language "$lang" --tab assign --preview-recenter --slot 5
+    shot "panel-$lang-assign-recenter-perf-missing" --language "$lang" --tab assign --preview-recenter --slot 6 --preview-perf missing
     # アプリ: 更新の帯の状態（4 つの基本の状態＋確認・更新中・入れた・失敗）と、入っていない・止まっているアプリ
     for state in uptodate checking available checkfailed confirm installing installed installfailed manual; do
         shot "panel-$lang-app-update-$state" --language "$lang" --tab app --preview-update "$state"

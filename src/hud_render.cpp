@@ -36,24 +36,43 @@ void toneColors(HudToast::Tone tone, Color& fill, Color& fg) {
     }
 }
 
+/** 幅に収めた 1 行目と 2 行目。 */
+struct FittedToastText {
+    double titleSize = 0;
+    double subSize = 0;
+    std::string title;
+    std::string sub;
+    double width = 0;  ///< 2 行のうち広いほうの幅
+};
+
 /**
- * 1 行目と 2 行目の文字の大きさを、幅に収まるよう決める。
+ * 1 行目と 2 行目を、幅に収まるよう決める（文字を小さくし、最小の大きさでも入らなければ後ろを「…」にする）。
  * @param pen 描画の道具
  * @param toast 中身
  * @param style 寸法
  * @param maxTextW 文字に使える幅
- * @param titleSize 1 行目の大きさの書き込み先
- * @param subSize 2 行目の大きさの書き込み先
+ * @return 収めた文字と大きさ
  */
-void fitToastText(const Pen& pen, const HudToast& toast, const ToastStyle& style, double maxTextW, double& titleSize,
-                  double& subSize) {
-    titleSize = fitSize(pen, toast.title, toast.error ? style.errorTitleSize : style.titleSize, 14, maxTextW, true);
-    subSize = toast.sub.empty() ? 0 : fitSize(pen, toast.sub, style.subSize, 11, maxTextW, false);
+FittedToastText fitToastText(const Pen& pen, const HudToast& toast, const ToastStyle& style, double maxTextW) {
+    FittedToastText out;
+    out.titleSize = fitSize(pen, toast.title, toast.error ? style.errorTitleSize : style.titleSize, 14, maxTextW, true);
+    out.title = ellipsize(pen, toast.title, out.titleSize, true, maxTextW);
+    out.width = pen.measure(out.title, out.titleSize, true);
+    if (!toast.sub.empty()) {
+        out.subSize = fitSize(pen, toast.sub, style.subSize, 11, maxTextW, false);
+        // 一番小さくしても入らない（長い曲名など）なら、読める大きさのまま後ろを「…」にする
+        if (pen.measure(toast.sub, out.subSize, false) > maxTextW) out.subSize = std::min(style.subSize, 14.0);
+        out.sub = ellipsize(pen, toast.sub, out.subSize, false, maxTextW);
+        out.width = std::max(out.width, pen.measure(out.sub, out.subSize, false));
+    }
+    return out;
 }
 
 }  // namespace
 
-double measureToast(const Pen& pen, const HudToast& toast, const ToastStyle& style) {
+double measureToast(const Pen& pen, const HudToast& toast, const ToastStyle& style, double maxWidth) {
+    const double fixedW = style.padLeft + style.iconDiameter + style.gap + style.padRight;
+    if (maxWidth > 0) return fixedW + fitToastText(pen, toast, style, maxWidth - fixedW).width;
     const double titleSize = toast.error ? style.errorTitleSize : style.titleSize;
     double textW = pen.measure(toast.title, titleSize, true);
     if (!toast.sub.empty()) textW = std::max(textW, pen.measure(toast.sub, style.subSize, false));
@@ -63,12 +82,10 @@ double measureToast(const Pen& pen, const HudToast& toast, const ToastStyle& sty
 void drawToast(const Pen& pen, const HudToast& toast, const ToastStyle& style, double x, double y, double maxWidth) {
     cairo_t* cr = pen.cr;
     const double fixedW = style.padLeft + style.iconDiameter + style.gap + style.padRight;
-    double titleSize = 0;
-    double subSize = 0;
-    fitToastText(pen, toast, style, maxWidth - fixedW, titleSize, subSize);
-    double textW = pen.measure(toast.title, titleSize, true);
-    if (!toast.sub.empty()) textW = std::max(textW, pen.measure(toast.sub, subSize, false));
-    const double w = fixedW + textW;
+    const FittedToastText text = fitToastText(pen, toast, style, maxWidth - fixedW);
+    const double titleSize = text.titleSize;
+    const double subSize = text.subSize;
+    const double w = fixedW + text.width;
     const double h = style.height;
 
     // ピル: ふつうは濃い灰色の地に灰色の枠、失敗は赤みの地に赤い枠
@@ -94,15 +111,15 @@ void drawToast(const Pen& pen, const HudToast& toast, const ToastStyle& style, d
 
     // 文字（1 行目は line-height 1.3、2 行目は 1.45 で、2 行をまとめて縦の真ん中に置く）
     const double textX = x + style.padLeft + style.iconDiameter + style.gap;
-    if (toast.sub.empty()) {
-        pen.text(textX, centerBaseline(y, h, titleSize), toast.title, titleSize, kText, true);
+    if (text.sub.empty()) {
+        pen.text(textX, centerBaseline(y, h, titleSize), text.title, titleSize, kText, true);
         return;
     }
     const double titleLine = titleSize * 1.3;
     const double subLine = subSize * 1.45;
     const double top = y + (h - titleLine - subLine) / 2;
-    pen.text(textX, centerBaseline(top, titleLine, titleSize), toast.title, titleSize, kText, true);
-    pen.text(textX, centerBaseline(top + titleLine, subLine, subSize), toast.sub, subSize,
+    pen.text(textX, centerBaseline(top, titleLine, titleSize), text.title, titleSize, kText, true);
+    pen.text(textX, centerBaseline(top + titleLine, subLine, subSize), text.sub, subSize,
              toast.error ? kDangerSub : kTextMuted, false);
 }
 
@@ -155,7 +172,7 @@ const std::vector<uint8_t>& HudRenderer::renderToast(const HudToast& toast) {
     const Pen pen {cr, &fonts_};
     const ToastStyle style;
     const double maxW = kToastCssW - 8;
-    const double w = std::min(measureToast(pen, toast, style), maxW);
+    const double w = measureToast(pen, toast, style, maxW);
     drawToast(pen, toast, style, (kToastCssW - w) / 2, (kToastCssH - style.height) / 2, maxW);
     cairo_destroy(cr);
     surfaceToRgba(toastSurface_, toastRgba_);

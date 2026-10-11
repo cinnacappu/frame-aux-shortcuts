@@ -25,7 +25,7 @@ struct HudToast {
 
 /**
  * 押し方の結果からお知らせを作る。何もしなかった（none・6 回以上）と、ダッシュボードが開いたとき
- * （開いた画面そのものが手応えになる）は出さない。
+ * （開いた画面そのものが手応えになる）は出さない。音楽の操作は、曲名が分かれば 2 行目を曲名にする。
  * @param press 押し方の結果
  * @param language 言語
  * @param toast 出すときの書き込み先
@@ -44,7 +44,8 @@ HudToast makeHandBackToast(bool handedBack, Language language);
 /**
  * 失敗の理由のコードを文言にする。
  * @param language 言語
- * @param reason "no_steamvr" / "room_view_api" / "app_missing" / "app_stopped" / それ以外
+ * @param reason "no_steamvr" / "room_view_api" / "app_missing" / "app_stopped" / "no_command" / "no_pc" / "no_player" /
+ *               "media_unsupported" / "not_worn" / "not_tracking" / それ以外
  * @return 文言
  */
 std::string reasonText(Language language, const std::string& reason);

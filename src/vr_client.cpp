@@ -55,6 +55,13 @@ void VrClient::pollEvents() {
             // スクリーンショット（requestScreenshot で頼んだもの）の結果。vrcompositor から来る
             case vr::VREvent_ScreenshotTaken: screenshotResults_[event.data.screenshot.handle] = true; break;
             case vr::VREvent_ScreenshotFailed: screenshotResults_[event.data.screenshot.handle] = false; break;
+            // 視点のリセット（このアプリのほか、ダッシュボードの「中央に戻す」・コントローラーの長押しでも来る）
+            case vr::VREvent_StandingZeroPoseReset:
+                std::fprintf(stderr, "[VR] 視点がリセットされました（Standing）\n");
+                break;
+            case vr::VREvent_SeatedZeroPoseReset:
+                std::fprintf(stderr, "[VR] 視点がリセットされました（Seated）\n");
+                break;
             default: break;
         }
     }
@@ -181,6 +188,45 @@ bool VrClient::readPointer(PointerSample& sample) {
     read.dashboardVisible = vr::VROverlay()->IsDashboardVisible();
     read.dashboardPointer = vr::VROverlay()->GetPrimaryDashboardDevice();
     sample = read;
+    return true;
+}
+
+bool VrClient::hmdInUse() {
+    if (!connected_) return false;
+    return vr::VRSystem()->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd) ==
+           vr::k_EDeviceActivityLevel_UserInteraction;
+}
+
+bool VrClient::readHmdAngularVelocity(double w[3]) {
+    if (!connected_) return false;
+    // 0 番（ヘッドセット）だけを読む。予測はしない（0 秒）。角速度の大きさと差は、基準の空間（Standing）によらない
+    vr::TrackedDevicePose_t pose {};
+    vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, &pose, 1);
+    if (!pose.bPoseIsValid || pose.eTrackingResult != vr::TrackingResult_Running_OK) return false;
+    for (int k = 0; k < 3; ++k) w[k] = pose.vAngularVelocity.v[k];
+    return true;
+}
+
+bool VrClient::hmdTracking() {
+    if (!connected_) return false;
+    vr::TrackedDevicePose_t pose {};
+    vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, &pose, 1);
+    return pose.bPoseIsValid && pose.eTrackingResult == vr::TrackingResult_Running_OK;
+}
+
+bool VrClient::resetZeroPose(std::string& error) {
+    if (!connected_) {
+        error = "SteamVR につながっていません";
+        return false;
+    }
+    vr::IVRChaperone* chaperone = vr::VRChaperone();
+    if (chaperone == nullptr) {
+        error = "IVRChaperone を取れません";
+        return false;
+    }
+    // 組み込みの長押しと同じく両方（vrclient のログでは "ResetZeroPose for both Seated and Standing"）
+    chaperone->ResetZeroPose(vr::TrackingUniverseStanding);
+    chaperone->ResetZeroPose(vr::TrackingUniverseSeated);
     return true;
 }
 

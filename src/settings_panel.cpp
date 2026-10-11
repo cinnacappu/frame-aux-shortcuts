@@ -7,6 +7,7 @@
 #include "hud_render.h"
 #include "i18n.h"
 #include "icons.h"
+#include "media.h"
 #include "osc.h"
 #include "theme.h"
 
@@ -36,6 +37,10 @@ constexpr double kGapMinMs = 200;
 constexpr double kGapMaxMs = 800;
 constexpr double kGapStepMs = 50;
 constexpr double kRecentSec = 600;     // 「さっき押した」を出す時間（秒）
+constexpr double kAssignGap = 12;      // 割り当てタブのカードの間
+constexpr double kPickerH = 190;       // 割り当てタブの下の列（選んだカードに割り当てる）の高さ
+constexpr double kPickerChipH = 50;    // 下の列の選択肢の高さ
+constexpr int kPickerActionCols = 5;   // 下の列のアクションの側の列の数（9 つを 2 段に）
 
 /**
  * CSS の行（line-height: normal ≒ 1.45）の上端から、文字のベースラインを出す。
@@ -57,26 +62,6 @@ size_t utf8Length(unsigned char c) {
     if ((c >> 5) == 0x6) return 2;
     if ((c >> 4) == 0xE) return 3;
     return 4;
-}
-
-/**
- * 幅に入らなければ、後ろを「…」にして縮める。
- * @param pen 描画の道具
- * @param text 文字列
- * @param size 大きさ
- * @param bold 太字か
- * @param maxW 幅
- * @return 入る文字列
- */
-std::string ellipsize(const Pen& pen, const std::string& text, double size, bool bold, double maxW) {
-    if (pen.measure(text, size, bold) <= maxW) return text;
-    std::vector<size_t> cuts;
-    for (size_t i = 0; i < text.size(); i += utf8Length(static_cast<unsigned char>(text[i]))) cuts.push_back(i);
-    for (size_t n = cuts.size(); n > 0; --n) {
-        const std::string candidate = text.substr(0, cuts[n - 1]) + "…";
-        if (pen.measure(candidate, size, bold) <= maxW) return candidate;
-    }
-    return "…";
 }
 
 /**
@@ -258,7 +243,7 @@ void drawCheckedLabel(const Pen& pen, double x, double baseline, const std::stri
 }
 
 /**
- * 押し方の番号から、その押し方の印（回数の丸・長押しの棒）を描く。
+ * 押し方の番号から、その押し方の印（回数の丸・長押しの棒・タップの回数の輪）を描く。
  * @param pen 描画の道具
  * @param slot 押し方
  * @param x 左
@@ -266,6 +251,18 @@ void drawCheckedLabel(const Pen& pen, double x, double baseline, const std::stri
  * @return 印の右端
  */
 double drawSlotMarks(const Pen& pen, int slot, double x, double cy) {
+    if (isTapSlot(slot)) {
+        // タップは中の空いた輪（aux の回数押しの丸と見分ける）
+        const int count = slot == kTap2Slot ? 2 : 3;
+        cairo_set_source_rgb(pen.cr, kTextLabel.r, kTextLabel.g, kTextLabel.b);
+        cairo_set_line_width(pen.cr, 2);
+        for (int k = 0; k < count; ++k) {
+            cairo_new_sub_path(pen.cr);
+            cairo_arc(pen.cr, x + 5 + k * 18, cy, 4, 0, 2 * M_PI);
+        }
+        cairo_stroke(pen.cr);
+        return x + count * 10 + (count - 1) * 8;
+    }
     if (slot >= kLongPressSlot) {
         fillRounded(pen, x, cy - 5, 44, 10, 5, kTextLabel);
         return x + 44;
@@ -368,7 +365,11 @@ std::string stateText(const UiText& t, const Action& action, const Config& confi
             if (s.perfVisible < 0) return t.stPerfUnknown;
             return s.perfVisible ? t.stPerfShown : t.stPerfHidden;
         case ActionType::DashboardOpen: return t.stDash;
+        case ActionType::Recenter: return t.stRecenter;
         case ActionType::OriginalAux: return t.stOriginal;
+        case ActionType::MediaPlayPause:
+        case ActionType::MediaNext:
+        case ActionType::MediaPrevious: return t.stMedia;
         case ActionType::Command: {
             const CommandDef* command = findCommand(config.commands, view.folderCommands, action.commandId);
             if (command == nullptr) return t.stCmdMissing;
@@ -702,8 +703,9 @@ PanelAction SettingsPanel::pointerDown(double x, double y, double now) {
         return action;
     }
     switch (action.kind) {
-        case K::PickerActions: pickerCommands_ = false; return PanelAction();
-        case K::PickerCommands: pickerCommands_ = true; return PanelAction();
+        case K::PickerActions: pickerSide_ = PickerSide::Actions; return PanelAction();
+        case K::PickerMedia: pickerSide_ = PickerSide::Media; return PanelAction();
+        case K::PickerCommands: pickerSide_ = PickerSide::Commands; return PanelAction();
         case K::PickerPrev: pickerPage_ = std::max(0, pickerPage_ - 1); return PanelAction();
         case K::PickerNext: pickerPage_ = std::min(pickerPageCount_ - 1, pickerPage_ + 1); return PanelAction();
         case K::Grip: {
@@ -826,7 +828,7 @@ bool SettingsPanel::scroll(double dy) {
         return true;
     }
     if (sheetOpen_) return false;
-    if (tab_ == PanelTab::Assign && pickerCommands_) {
+    if (tab_ == PanelTab::Assign && pickerSide_ == PickerSide::Commands) {
         // ページめくり: 1 ぶんたまるごとに 1 ページ（上へ倒すと前のページ）
         pickerScrollAccum_ += dy;
         if (std::fabs(pickerScrollAccum_) < 1.0) return false;
@@ -1002,8 +1004,8 @@ std::string SettingsPanel::appsConfirmCommand(const PanelView& view) const {
     return frame_apps::installerCommand(entry != nullptr ? entry->app.key : std::string());
 }
 
-void SettingsPanel::setPickerForPreview(bool commands, int page) {
-    pickerCommands_ = commands;
+void SettingsPanel::setPickerForPreview(PickerSide side, int page) {
+    pickerSide_ = side;
     pickerPage_ = page;
     autoPicker_ = false;
 }
@@ -1168,9 +1170,10 @@ void SettingsPanel::drawAssignTab(const Pen& pen, const UiText& t, const Config&
     using K = PanelAction::Kind;
     cairo_t* cr = pen.cr;
     const Language lang = config.language;
-    const double gap = 14;
+    // カードは 3 列 × 3 段（aux の押し方 6 つ・ヘッドセットのタップ 2 つ・タップの説明）。下に割り当ての列
+    const double gap = kAssignGap;
     const double cardW = (kContentW - gap * 2) / 3;
-    const double cardH = 168;
+    const double cardH = (kContentBottom - kContentY - kPickerH - gap * 3) / 3;
     const int recentSlot = view.haveStatus && view.status.lastPress.at > 0 &&
                                    view.now - view.status.lastPress.at <= kRecentSec
                                ? view.status.lastPress.slot()
@@ -1193,22 +1196,30 @@ void SettingsPanel::drawAssignTab(const Pen& pen, const UiText& t, const Config&
         const double left = x + 3 + 20;
         const double right = x + cardW - 3 - 20;
         // 上の行: 押し方の印・名前・さっき押した
-        const double rowCy = y + 3 + 16 + 15;
+        const double rowCy = y + 3 + 11 + 14;
         const double marksRight = drawSlotMarks(pen, slot, left, rowCy);
-        pen.text(marksRight + 8 + 4, centerBaseline(rowCy - 15, 30, 17), slotLabel(lang, slot), 17, kTextLabel, true);
+        double titleRight = right;
         if (slot == recentSlot) {
             char clock[16];
             const std::time_t at = static_cast<std::time_t>(view.status.lastPress.at);
             std::tm tm {};
             localtime_r(&at, &tm);
             std::strftime(clock, sizeof(clock), "%H:%M", &tm);
-            const std::string badge = formatText(t.recentFormat, clock);
+            const std::string badge = formatText(isTapSlot(slot) ? t.recentTapFormat : t.recentFormat, clock);
             const double bw = pen.measure(badge, 14, true) + 24;
-            fillRounded(pen, right - bw, rowCy - 14, bw, 28, 14, kAccent);
-            pen.text(right - bw + 12, centerBaseline(rowCy - 14, 28, 14), badge, 14, kOnAccent, true);
+            fillRounded(pen, right - bw, rowCy - 13, bw, 26, 13, kAccent);
+            pen.text(right - bw + 12, centerBaseline(rowCy - 13, 26, 14), badge, 14, kOnAccent, true);
+            titleRight = right - bw - 8;
         }
+        // タップは「ヘッドセットを 2 回タップ」。さっき押したの印と並んで入らなければ短い名前（「2 回タップ」）にする
+        const double titleX = marksRight + 8 + 4;
+        std::string title = slotTitle(lang, slot);
+        if (pen.measure(title, 17, true) > titleRight - titleX) title = slotLabel(lang, slot);
+        pen.text(titleX, centerBaseline(rowCy - 15, 30, 17), ellipsize(pen, title, 17, true, titleRight - titleX), 17,
+                 kTextLabel, true);
         // 下の行: アイコン・アクションの名前・今の状態
-        const double rowY = y + cardH - 3 - 20 - 60;
+        const double box = 52;
+        const double rowY = y + cardH - 3 - 13 - box;
         const bool muted = !(view.haveStatus && view.status.micMuted == 0);
         Color boxFill = kIconBox;
         Color boxFg = kText;
@@ -1219,22 +1230,41 @@ void SettingsPanel::drawAssignTab(const Pen& pen, const UiText& t, const Config&
             boxFill = kAccentTint;
             boxFg = kAccent;
         }
-        fillRounded(pen, left, rowY, 60, 60, 18, boxFill);
-        drawIcon(cr, iconForAction(action.type, muted), left + 30, rowY + 30, 30, boxFg);
-        const double textX = left + 60 + 16;
+        fillRounded(pen, left, rowY, box, box, 16, boxFill);
+        drawIcon(cr, iconForAction(action.type, muted), left + box / 2, rowY + box / 2, 26, boxFg);
+        const double textX = left + box + 16;
         const double textW = right - textX;
         std::string name = actionLabel(lang, action.type);
         if (action.type == ActionType::Command) {
             const CommandDef* command = findCommand(config.commands, view.folderCommands, action.commandId);
             name = command != nullptr ? command->name : t.missingCommand;
         }
-        const double nameSize = fitSize(pen, name, 25, 20, textW, true);
+        // 名前（23px）と状態（14px）の 2 行を、アイコンの高さの真ん中にそろえる
+        const double blockTop = rowY + (box - (23 * 1.45 + 2 + 14 * 1.45)) / 2;
+        const double nameSize = fitSize(pen, name, 23, 18, textW, true);
         name = ellipsize(pen, name, nameSize, true, textW);
-        pen.text(textX, lineBaseline(rowY, 25) + (25 - nameSize) * 0.3, name, nameSize, kText, true);
-        const std::string sub = ellipsize(pen, stateText(t, action, config, view), 15, !usable, textW);
-        pen.text(textX, lineBaseline(rowY + 25 * 1.45 + 2, 15), sub, 15, usable ? kTextMuted : kDanger, !usable);
+        pen.text(textX, lineBaseline(blockTop, 23) + (23 - nameSize) * 0.3, name, nameSize, kText, true);
+        const std::string sub = ellipsize(pen, stateText(t, action, config, view), 14, !usable, textW);
+        pen.text(textX, lineBaseline(blockTop + 23 * 1.45 + 2, 14), sub, 14, usable ? kTextMuted : kDanger, !usable);
     }
-    drawPicker(pen, t, config, view, kContentY + 2 * (cardH + gap));
+    // 最後の 1 枠: タップの説明（押せない。点線の枠）
+    {
+        const double x = kPad + 2 * (cardW + gap);
+        const double y = kContentY + 2 * (cardH + gap);
+        strokeDashed(pen, x, y, cardW, cardH, 20, kBorder, 2);
+        const double innerX = x + 3 + 20;
+        const double innerW = cardW - 2 * (3 + 20);
+        const std::vector<std::string> lines = wrapText(pen, t.tapNote, 14, innerW, 3);
+        const double blockH = 16 * 1.45 + 4 + lines.size() * 14 * 1.45;
+        double top = y + (cardH - blockH) / 2;
+        pen.text(innerX, lineBaseline(top, 16), t.tapNoteTitle, 16, kTextLabel, true);
+        top += 16 * 1.45 + 4;
+        for (const std::string& line : lines) {
+            pen.text(innerX, lineBaseline(top, 14), line, 14, kTextMuted);
+            top += 14 * 1.45;
+        }
+    }
+    drawPicker(pen, t, config, view, kContentBottom - kPickerH);
 }
 
 void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& config, const PanelView& view,
@@ -1243,108 +1273,183 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
     cairo_t* cr = pen.cr;
     const Language lang = config.language;
 
-    // 下の区画: 選んだ押し方に割り当てる（余白 16 / 20・間 12。見出しの行は高さ 48）
+    // 下の区画: 選んだ押し方に割り当てる（余白 14 / 20・間 10。見出しの行は高さ 44、選択肢は高さ kPickerChipH の 2 段）
     const double secH = kContentBottom - secY;
     fillRounded(pen, kPad, secY, kContentW, secH, 20, kCard);
     const double innerX = kPad + 20;
     const double innerW = kContentW - 40;
-    const double rowY = secY + 16;
+    const double rowY = secY + 14;
+    const double headH = 44;
+    const double chipH = kPickerChipH;
     const Action& current = config.slot(selectedSlot_);
     const std::vector<CommandDef> commands = allCommands(config, view);
-    // 側とページ: カードを選んだとき（とパネルを開いたとき）は、割り当てがコマンドならその側のそのページ
+    // 側とページ: カードを選んだとき（とパネルを開いたとき）は、割り当ての種類の側（コマンドならそのページ）
     const int slotCount = static_cast<int>(commands.size()) + 1;  // 最後は「＋ コマンドを足す」
     pickerPageCount_ = pageCount(slotCount, kPickerPerPage);
     if (autoPicker_) {
         autoPicker_ = false;
-        pickerCommands_ = current.type == ActionType::Command;
+        pickerSide_ = current.type == ActionType::Command ? PickerSide::Commands
+                      : isMediaAction(current.type)       ? PickerSide::Media
+                                                          : PickerSide::Actions;
         pickerPage_ = 0;
         for (size_t i = 0; i < commands.size(); ++i) {
-            if (pickerCommands_ && commands[i].id == current.commandId) pickerPage_ = static_cast<int>(i) / kPickerPerPage;
+            if (pickerSide_ == PickerSide::Commands && commands[i].id == current.commandId) {
+                pickerPage_ = static_cast<int>(i) / kPickerPerPage;
+            }
         }
     }
     pickerPage_ = std::clamp(pickerPage_, 0, pickerPageCount_ - 1);
 
-    // 見出しの行: 見出し・説明（左）、「1 / 2」と［アクション｜コマンド（件数）］（右）
-    const std::string segLeft = t.pickerActions;
-    const std::string segRight = formatText(t.pickerCommandsFormat, std::to_string(commands.size()));
-    const double segW1 = 32 + checkedLabelWidth(pen, segLeft, 16, !pickerCommands_);
-    const double segW2 = 32 + checkedLabelWidth(pen, segRight, 16, pickerCommands_);
-    const double segW = 2 + 2 + segW1 + 4 + segW2 + 2 + 2;
+    // 見出しの行: 見出し・説明（左）、「1 / 2」と［アクション｜音楽｜コマンド（件数）］（右）
+    struct Segment {
+        K kind;
+        PickerSide side;
+        std::string label;
+        double w;
+    };
+    Segment segments[] = {
+        {K::PickerActions, PickerSide::Actions, t.pickerActions, 0},
+        {K::PickerMedia, PickerSide::Media, t.pickerMedia, 0},
+        {K::PickerCommands, PickerSide::Commands, formatText(t.pickerCommandsFormat, std::to_string(commands.size())), 0},
+    };
+    double segW = 2 + 2 + 2 + 2 + 4 * 2;  // 枠の線と内側の余白（左右）＋ 区切りの間 2 つ
+    for (Segment& segment : segments) {
+        segment.w = 32 + checkedLabelWidth(pen, segment.label, 16, pickerSide_ == segment.side);
+        segW += segment.w;
+    }
     const double segX = innerX + innerW - segW;
-    strokeRounded(pen, segX, rowY, segW, 48, 24, kBorder, 2);
+    strokeRounded(pen, segX, rowY, segW, headH, headH / 2, kBorder, 2);
     double bx = segX + 4;
-    for (int i = 0; i < 2; ++i) {
-        const bool on = (i == 1) == pickerCommands_;
-        const PanelAction action {i == 0 ? K::PickerActions : K::PickerCommands, 0, 0, ""};
-        const double w = i == 0 ? segW1 : segW2;
+    for (const Segment& segment : segments) {
+        const bool on = pickerSide_ == segment.side;
+        const PanelAction action {segment.kind, 0, 0, ""};
         if (on) {
-            fillRounded(pen, bx, rowY + 4, w, 40, 20, kAccent);
+            fillRounded(pen, bx, rowY + 4, segment.w, headH - 8, (headH - 8) / 2, kAccent);
         } else if (isHot(action)) {
-            fillRounded(pen, bx, rowY + 4, w, 40, 20, kControlHover);
+            fillRounded(pen, bx, rowY + 4, segment.w, headH - 8, (headH - 8) / 2, kControlHover);
         }
-        drawCheckedLabel(pen, bx + 16, centerBaseline(rowY + 4, 40, 16), i == 0 ? segLeft : segRight, 16,
-                         on ? kOnAccent : kText, on);
-        addButton(action, bx, rowY, w, 48);
-        bx += w + 4;
+        drawCheckedLabel(pen, bx + 16, centerBaseline(rowY + 4, headH - 8, 16), segment.label, 16, on ? kOnAccent : kText, on);
+        addButton(action, bx, rowY, segment.w, headH);
+        bx += segment.w + 4;
     }
     double rightEdge = segX - 12;
-    if (pickerCommands_) {
+    if (pickerSide_ == PickerSide::Commands) {
         const std::string pageText = std::to_string(pickerPage_ + 1) + " / " + std::to_string(pickerPageCount_);
         rightEdge -= 6;
-        rightEdge -= pen.text(rightEdge, centerBaseline(rowY, 48, 15), pageText, 15, kTextMuted, true, true) + 12;
+        rightEdge -= pen.text(rightEdge, centerBaseline(rowY, headH, 15), pageText, 15, kTextMuted, true, true) + 12;
     }
     const std::string heading = formatText(t.assignHeadingFormat, slotLabel(lang, selectedSlot_));
-    const double headW = pen.text(innerX, centerBaseline(rowY, 48, 20), heading, 20, kText, true);
+    const double headW = pen.text(innerX, centerBaseline(rowY, headH, 20), heading, 20, kText, true);
     const double hintW = rightEdge - (innerX + headW + 12);
     if (hintW > 40) {
-        pen.text(innerX + headW + 12, centerBaseline(rowY, 48, 20), ellipsize(pen, t.assignHint, 14, false, hintW), 14,
+        pen.text(innerX + headW + 12, centerBaseline(rowY, headH, 20), ellipsize(pen, t.assignHint, 14, false, hintW), 14,
                  kTextMuted);
     }
 
-    const double gridY = rowY + 48 + 12;
-    const double chipGap = 10;
-    if (!pickerCommands_) {
-        // アクション: 4 列のグリッド（コマンドは右の側で選ぶ）
-        const double chipW = (innerW - chipGap * 3) / 4;
-        int index = 0;
-        for (const ActionSpec& spec : actionSpecs()) {
-            const ActionType type = spec.type;
-            if (type == ActionType::Command) continue;
-            const double cx = innerX + (index % 4) * (chipW + chipGap);
-            const double cy = gridY + (index / 4) * (56 + chipGap);
-            ++index;
-            const bool on = current.type == type;
-            const bool usable = actionUsable(type, view);
-            const PanelAction assign {K::Assign, static_cast<int>(type), selectedSlot_, ""};
+    const double gridY = rowY + headH + 10;
+    const double chipGap = 10;  // 横の間
+    const double rowGap = 8;    // 縦の間
+    const double chipW = (innerW - chipGap * 3) / 4;  // 音楽の側は 4 列の幅
+    const double actionChipW = (innerW - chipGap * (kPickerActionCols - 1)) / kPickerActionCols;  // アクションの側は 5 列
+    /**
+     * アクションの選択肢を 1 つ描く（アクション・音楽の側）。
+     * @param type 種類
+     * @param cx 左
+     * @param cy 上
+     * @param chipW 幅
+     * @param withIcon 名前の前にアイコンを描く（音楽の側）
+     */
+    const auto drawActionChip = [&](ActionType type, double cx, double cy, double chipW, bool withIcon) {
+        const bool on = current.type == type;
+        const bool usable = actionUsable(type, view);
+        const PanelAction assign {K::Assign, static_cast<int>(type), selectedSlot_, ""};
+        if (on) {
+            fillRounded(pen, cx, cy, chipW, chipH, chipH / 2, pressed_ == assign ? kAccentPressed : kAccent);
+        } else if (!usable) {
+            strokeDashed(pen, cx, cy, chipW, chipH, chipH / 2, kBorder, 2);
+            if (isHot(assign)) fillRounded(pen, cx + 2, cy + 2, chipW - 4, chipH - 4, chipH / 2 - 2, kControlHover);
+        } else {
+            fillRounded(pen, cx, cy, chipW, chipH, chipH / 2, isHot(assign) ? kControlHover : kControl);
+            strokeRounded(pen, cx, cy, chipW, chipH, chipH / 2, isHot(assign) ? kAccent : kBorder, 2);
+        }
+        const std::string tag = usable ? std::string() : std::string(t.chipMissing);
+        const Color fg = on ? kOnAccent : (!usable ? kTextFaint : kText);
+        const double tagW = tag.empty() ? 0 : pen.measure(tag, 12, true) + 8;
+        const std::string label = actionLabel(lang, type);
+        if (withIcon) {
+            // コマンドの側の選択肢と同じ並び（チェック・アイコン・名前）
+            double tx = cx + 16;
             if (on) {
-                fillRounded(pen, cx, cy, chipW, 56, 28, pressed_ == assign ? kAccentPressed : kAccent);
-            } else if (!usable) {
-                strokeDashed(pen, cx, cy, chipW, 56, 28, kBorder, 2);
-                if (isHot(assign)) fillRounded(pen, cx + 2, cy + 2, chipW - 4, 52, 26, kControlHover);
-            } else {
-                fillRounded(pen, cx, cy, chipW, 56, 28, isHot(assign) ? kControlHover : kControl);
-                strokeRounded(pen, cx, cy, chipW, 56, 28, isHot(assign) ? kAccent : kBorder, 2);
+                drawCheck(cr, tx + 17 * 0.4, cy + chipH / 2, 17 * 0.75, fg);
+                tx += 17 * 0.95;
             }
-            const std::string tag = usable ? std::string() : std::string(t.chipMissing);
-            const Color fg = on ? kOnAccent : (!usable ? kTextFaint : kText);
-            const double tagW = tag.empty() ? 0 : pen.measure(tag, 12, true) + 8;
-            const std::string label = actionLabel(lang, type);
-            const double labelSize = fitSize(pen, label, 17, 12, chipW - 32 - tagW - (on ? 17 : 0), true);
+            drawIcon(cr, iconForAction(type), tx + 10, cy + chipH / 2, 20, fg, 2.2);
+            tx += 20 + 8;
+            const double labelW = cx + chipW - 16 - tagW - tx;
+            const double labelSize = fitSize(pen, label, 17, 12, labelW, true);
+            pen.text(tx, centerBaseline(cy, chipH, labelSize), ellipsize(pen, label, labelSize, true, labelW), labelSize, fg,
+                     true);
+        } else if (!tag.empty()) {
+            // 入っていないアプリ: 5 列の幅では名前と札が横に並ばないので、名前の下に札を置く（2 行を真ん中にそろえる）
+            const double labelW = chipW - 32 - (on ? 17 : 0);
+            const double labelSize = fitSize(pen, label, 15, 12, labelW, true);
+            const double blockTop = cy + (chipH - (labelSize * 1.2 + 12 * 1.2)) / 2;
+            const double labelBase = centerBaseline(blockTop, labelSize * 1.2, labelSize);
+            const std::string shown = ellipsize(pen, label, labelSize, true, labelW);
+            if (on) {
+                drawCheckedLabel(pen, cx + 16, labelBase, shown, labelSize, fg, true);
+            } else {
+                pen.text(cx + 16, labelBase, shown, labelSize, fg, true);
+            }
+            pen.text(cx + 16 + (on ? labelSize * 0.95 : 0), centerBaseline(blockTop + labelSize * 1.2, 12 * 1.2, 12), tag, 12,
+                     on ? kOnAccent : kDanger, true);
+        } else {
+            const double labelW = chipW - 32 - (on ? 17 : 0);
+            const double labelSize = fitSize(pen, label, 17, 12, labelW, true);
+            const std::string shown = ellipsize(pen, label, labelSize, true, labelW);
             // 選んでいないときも太字（700）
             if (on) {
-                drawCheckedLabel(pen, cx + 16, centerBaseline(cy, 56, labelSize), label, labelSize, fg, true);
+                drawCheckedLabel(pen, cx + 16, centerBaseline(cy, chipH, labelSize), shown, labelSize, fg, true);
             } else {
-                pen.text(cx + 16, centerBaseline(cy, 56, labelSize), label, labelSize, fg, true);
+                pen.text(cx + 16, centerBaseline(cy, chipH, labelSize), shown, labelSize, fg, true);
             }
-            if (!tag.empty()) pen.text(cx + chipW - 16, centerBaseline(cy, 56, 12), tag, 12, on ? kOnAccent : kDanger, true, true);
-            addButton(assign, cx, cy, chipW, 56);
+        }
+        if (!tag.empty() && withIcon) {
+            pen.text(cx + chipW - 16, centerBaseline(cy, chipH, 12), tag, 12, on ? kOnAccent : kDanger, true, true);
+        }
+        addButton(assign, cx, cy, chipW, chipH);
+    };
+    if (pickerSide_ == PickerSide::Actions) {
+        // アクション: 5 列 × 2 段のグリッド（9 つ。「なし」は最後。音楽・コマンドはそれぞれの側で選ぶ）
+        int index = 0;
+        for (const ActionSpec& spec : actionSpecs()) {
+            if (spec.type == ActionType::Command || isMediaAction(spec.type)) continue;
+            drawActionChip(spec.type, innerX + (index % kPickerActionCols) * (actionChipW + chipGap),
+                           gridY + (index / kPickerActionCols) * (chipH + rowGap), actionChipW, false);
+            ++index;
+        }
+        return;
+    }
+    if (pickerSide_ == PickerSide::Media) {
+        // 音楽: 1 段目に 3 つ（アクションの側と同じ幅）、2 段目に説明（何が相手か・PC の音は対象外）
+        int index = 0;
+        for (const ActionSpec& spec : actionSpecs()) {
+            if (!isMediaAction(spec.type)) continue;
+            drawActionChip(spec.type, innerX + index * (chipW + chipGap), gridY, chipW, true);
+            ++index;
+        }
+        const std::vector<std::string> lines = wrapText(pen, t.mediaNote, 14, innerW - 32, 2);
+        double top = gridY + chipH + rowGap + (chipH - lines.size() * 14 * 1.45) / 2;
+        for (const std::string& line : lines) {
+            pen.text(innerX + 16, lineBaseline(top, 14), line, 14, kTextMuted);
+            top += 14 * 1.45;
         }
         return;
     }
 
     // コマンド: 左右に［‹］［›］（幅 52）、真ん中に 4 列 × 2 行。最後のページの最後に「＋ コマンドを足す」
     const double navW = 52;
-    const double gridH = 56 * 2 + chipGap;
+    const double gridH = chipH * 2 + rowGap;
     const bool canPrev = pickerPage_ > 0;
     const bool canNext = pickerPage_ < pickerPageCount_ - 1;
     const PanelAction prev {K::PickerPrev, 0, 0, ""};
@@ -1355,42 +1460,42 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
     addButton(next, innerX + innerW - navW, gridY, navW, gridH, canNext);
     const double gx = innerX + navW + chipGap;
     const double gw = innerW - 2 * (navW + chipGap);
-    const double chipW = (gw - chipGap * 3) / 4;
+    const double commandChipW = (gw - chipGap * 3) / 4;
     const int first = pickerPage_ * kPickerPerPage;
     for (int k = 0; k < kPickerPerPage && first + k < slotCount; ++k) {
         const int index = first + k;
-        const double cx = gx + (k % 4) * (chipW + chipGap);
-        const double cy = gridY + (k / 4) * (56 + chipGap);
+        const double cx = gx + (k % 4) * (commandChipW + chipGap);
+        const double cy = gridY + (k / 4) * (chipH + rowGap);
         if (index == slotCount - 1) {
             // 「＋ コマンドを足す」（点線のピンク）
             const PanelAction add {K::AddCommand, 0, 0, ""};
-            if (isHot(add)) fillRounded(pen, cx, cy, chipW, 56, 28, kAccentTint);
-            strokeDashed(pen, cx, cy, chipW, 56, 28, kAccent, 2);
-            const double size = fitSize(pen, t.cmdAdd, 17, 12, chipW - 24, true);
-            textCentered(pen, cx + chipW / 2, centerBaseline(cy, 56, size), t.cmdAdd, size, kAccent, true);
-            addButton(add, cx, cy, chipW, 56);
+            if (isHot(add)) fillRounded(pen, cx, cy, commandChipW, chipH, chipH / 2, kAccentTint);
+            strokeDashed(pen, cx, cy, commandChipW, chipH, chipH / 2, kAccent, 2);
+            const double size = fitSize(pen, t.cmdAdd, 17, 12, commandChipW - 24, true);
+            textCentered(pen, cx + commandChipW / 2, centerBaseline(cy, chipH, size), t.cmdAdd, size, kAccent, true);
+            addButton(add, cx, cy, commandChipW, chipH);
             continue;
         }
         const CommandDef& command = commands[static_cast<size_t>(index)];
         const PanelAction assign {K::Assign, static_cast<int>(ActionType::Command), selectedSlot_, command.id};
         const bool on = current.type == ActionType::Command && current.commandId == command.id;
         if (on) {
-            fillRounded(pen, cx, cy, chipW, 56, 28, pressed_ == assign ? kAccentPressed : kAccent);
+            fillRounded(pen, cx, cy, commandChipW, chipH, chipH / 2, pressed_ == assign ? kAccentPressed : kAccent);
         } else {
-            fillRounded(pen, cx, cy, chipW, 56, 28, isHot(assign) ? kControlHover : kControl);
-            strokeRounded(pen, cx, cy, chipW, 56, 28, isHot(assign) ? kAccent : kBorder, 2);
+            fillRounded(pen, cx, cy, commandChipW, chipH, chipH / 2, isHot(assign) ? kControlHover : kControl);
+            strokeRounded(pen, cx, cy, commandChipW, chipH, chipH / 2, isHot(assign) ? kAccent : kBorder, 2);
         }
         const Color fg = on ? kOnAccent : kText;
         double tx = cx + 16;
         if (on) {
-            drawCheck(cr, tx + 17 * 0.4, cy + 28, 17 * 0.75, fg);
+            drawCheck(cr, tx + 17 * 0.4, cy + chipH / 2, 17 * 0.75, fg);
             tx += 17 * 0.95;
         }
-        drawIcon(cr, Icon::Terminal, tx + 10, cy + 28, 20, fg, 2.2);
+        drawIcon(cr, Icon::Terminal, tx + 10, cy + chipH / 2, 20, fg, 2.2);
         tx += 20 + 8;
-        const std::string label = ellipsize(pen, command.name, 17, true, cx + chipW - 16 - tx);
-        pen.text(tx, centerBaseline(cy, 56, 17), label, 17, fg, true);
-        addButton(assign, cx, cy, chipW, 56);
+        const std::string label = ellipsize(pen, command.name, 17, true, cx + commandChipW - 16 - tx);
+        pen.text(tx, centerBaseline(cy, chipH, 17), label, 17, fg, true);
+        addButton(assign, cx, cy, commandChipW, chipH);
     }
 }
 
@@ -2299,7 +2404,7 @@ void SettingsPanel::drawDisplayTab(const Pen& pen, const UiText& t, const Config
         toast.icon = Icon::MicOff;
         toast.tone = HudToast::Tone::Danger;
         toast.title = t.hudMicMuted;
-        const double tw = std::min(measureToast(pen, toast, style), colW - 48);
+        const double tw = measureToast(pen, toast, style, colW - 48);
         cairo_push_group(cr);
         drawToast(pen, toast, style, centerX - tw / 2, kContentY + h - 2 - 24 - 60, colW - 48);
         cairo_pop_group_to_source(cr);

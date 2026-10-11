@@ -58,7 +58,11 @@ Icon iconForAction(ActionType type, bool muted) {
         case ActionType::Screenshot: return Icon::Camera;
         case ActionType::PerfOverlayToggle: return Icon::Chart;
         case ActionType::DashboardOpen: return Icon::Grid;
+        case ActionType::Recenter: return Icon::Recenter;
         case ActionType::OriginalAux: return Icon::Pointer;
+        case ActionType::MediaPlayPause: return Icon::PlayPause;
+        case ActionType::MediaNext: return Icon::SkipNext;
+        case ActionType::MediaPrevious: return Icon::SkipPrevious;
         case ActionType::Command: return Icon::Terminal;
         case ActionType::None: return Icon::NoEntry;
     }
@@ -189,6 +193,54 @@ void drawIcon(cairo_t* cr, Icon icon, double cx, double cy, double size, Color c
             cairo_line_to(cr, 20, 11);
             cairo_close_path(cr);
             line(cr, 13.5, 13.5, 19.5, 19.5);
+            break;
+        case Icon::PlayPause:
+            // M3 5 l9 7 -9 7z（三角）・M16 5v14・M21 5v14（2 本の棒）
+            cairo_move_to(cr, 3, 5);
+            cairo_line_to(cr, 12, 12);
+            cairo_line_to(cr, 3, 19);
+            cairo_close_path(cr);
+            line(cr, 16, 5, 16, 19);
+            line(cr, 21, 5, 21, 19);
+            break;
+        case Icon::Play:
+            // Feather の play: polygon 5 3 19 12 5 21
+            cairo_move_to(cr, 5, 3);
+            cairo_line_to(cr, 19, 12);
+            cairo_line_to(cr, 5, 21);
+            cairo_close_path(cr);
+            break;
+        case Icon::Pause:
+            // Feather の pause: rect 6 4 4 16・rect 14 4 4 16
+            roundedRectPath(cr, 6, 4, 4, 16, 1);
+            roundedRectPath(cr, 14, 4, 4, 16, 1);
+            break;
+        case Icon::SkipNext:
+            // Feather の skip-forward: polygon 5 4 15 12 5 20・M19 5v14
+            cairo_move_to(cr, 5, 4);
+            cairo_line_to(cr, 15, 12);
+            cairo_line_to(cr, 5, 20);
+            cairo_close_path(cr);
+            line(cr, 19, 5, 19, 19);
+            break;
+        case Icon::SkipPrevious:
+            // Feather の skip-back: polygon 19 20 9 12 19 4・M5 19V5
+            cairo_move_to(cr, 19, 20);
+            cairo_line_to(cr, 9, 12);
+            cairo_line_to(cr, 19, 4);
+            cairo_close_path(cr);
+            line(cr, 5, 19, 5, 5);
+            break;
+        case Icon::Recenter:
+            // Lucide の locate-fixed: 丸 r7・M2 12h3・M19 12h3・M12 2v3・M12 19v3 ＋ 真ん中の丸 r3（ここでは塗らずに線）
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, 12, 12, 7, 0, 2 * M_PI);
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, 12, 12, 2.5, 0, 2 * M_PI);
+            line(cr, 2, 12, 5, 12);
+            line(cr, 19, 12, 22, 12);
+            line(cr, 12, 2, 12, 5);
+            line(cr, 12, 19, 12, 22);
             break;
     }
     cairo_stroke(cr);

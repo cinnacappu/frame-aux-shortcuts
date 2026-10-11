@@ -21,6 +21,8 @@
     "press_3": { "type": "room_view_toggle" },
     "press_4": { "type": "screenshot" },
     "press_5": { "type": "perf_overlay_toggle" },
-    "long_press": { "type": "dashboard_open" }
+    "long_press": { "type": "dashboard_open" },
+    "tap_2": { "type": "none" },
+    "tap_3": { "type": "none" }
   }
 }

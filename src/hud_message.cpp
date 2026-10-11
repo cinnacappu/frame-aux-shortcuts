@@ -2,7 +2,9 @@
 #include "hud_message.h"
 
 #include "i18n.h"
+#include "media.h"
 #include "osc.h"
+#include "recenter.h"
 
 std::string reasonText(Language language, const std::string& reason) {
     const UiText& t = uiText(language);
@@ -12,6 +14,10 @@ std::string reasonText(Language language, const std::string& reason) {
     if (reason == "app_stopped") return t.reasonPerfStopped;
     if (reason == "no_command") return t.reasonNoCommand;
     if (reason == "no_pc") return t.reasonNoPc;
+    if (reason == kReasonNoPlayer) return t.reasonNoPlayer;
+    if (reason == kReasonMediaUnsupported) return t.reasonMediaUnsupported;
+    if (reason == kReasonNotWorn) return t.reasonNotWorn;
+    if (reason == kReasonNotTracking) return t.reasonNotTracking;
     return t.reasonFailed;
 }
 
@@ -64,7 +70,11 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
             case ActionType::Screenshot: out.title = t.failShot; break;
             case ActionType::PerfOverlayToggle: out.title = t.failPerf; break;
             case ActionType::DashboardOpen: out.title = t.failDash; break;
+            case ActionType::Recenter: out.title = t.failRecenter; break;
             case ActionType::OriginalAux: out.title = t.failOriginal; break;
+            case ActionType::MediaPlayPause: out.title = t.failMediaPlayPause; break;
+            case ActionType::MediaNext: out.title = t.failMediaNext; break;
+            case ActionType::MediaPrevious: out.title = t.failMediaPrevious; break;
             case ActionType::Command: out.title = t.failCmd; break;
             case ActionType::None: return false;
         }
@@ -109,7 +119,33 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
             out.title = press.value == "shown" ? t.hudPerfShown : (press.value == "hidden" ? t.hudPerfHidden : t.hudPerfToggled);
             break;
         case ActionType::DashboardOpen: return false;  // 開いたダッシュボードが手応えになる
+        case ActionType::Recenter:
+            // 1 秒以内の 2 回目（し直さなかった）も、向きは今リセットしたところなので同じお知らせ
+            out.icon = Icon::Recenter;
+            out.tone = HudToast::Tone::Accent;
+            out.title = t.hudRecenter;
+            break;
         case ActionType::OriginalAux: return false;  // 開く・クリックした結果が手応えになる（失敗だけ出す）
+        case ActionType::MediaPlayPause:
+        case ActionType::MediaNext:
+        case ActionType::MediaPrevious:
+            // 1 行目は何をしたか、2 行目は曲名（分からなければ押し方のまま）
+            if (press.value == kMediaPlaying) {
+                out.icon = Icon::Play;
+                out.tone = HudToast::Tone::Accent;
+                out.title = t.hudMediaPlaying;
+            } else if (press.value == kMediaPaused) {
+                out.icon = Icon::Pause;
+                out.tone = HudToast::Tone::Neutral;
+                out.title = t.hudMediaPaused;
+            } else {
+                const bool next = press.action == ActionType::MediaNext;
+                out.icon = next ? Icon::SkipNext : Icon::SkipPrevious;
+                out.tone = HudToast::Tone::Accent;
+                out.title = next ? t.hudMediaNext : t.hudMediaPrevious;
+            }
+            if (!press.track.empty()) out.sub = press.track;
+            break;
         case ActionType::Command:
             out.icon = Icon::Terminal;
             out.tone = HudToast::Tone::Neutral;

@@ -46,13 +46,14 @@ std::string triState(int value) {
 /**
  * 押し方の種類の名前。
  * @param kind 種類
- * @return "count" / "long" / "too_many" / "none"
+ * @return "count" / "long" / "too_many" / "tap" / "none"
  */
 const char* kindName(PressRecord::Kind kind) {
     switch (kind) {
         case PressRecord::Kind::Count: return "count";
         case PressRecord::Kind::Long: return "long";
         case PressRecord::Kind::TooMany: return "too_many";
+        case PressRecord::Kind::Tap: return "tap";
         case PressRecord::Kind::None: return "none";
     }
     return "none";
@@ -98,6 +99,8 @@ long long readNumber(const JsonValue& object, const char* key, long long fallbac
 int PressRecord::slot() const {
     if (kind == Kind::Long) return kLongPressSlot;
     if (kind == Kind::Count && count >= 1 && count <= kMaxPressCount) return count - 1;
+    if (kind == Kind::Tap && count == 2) return kTap2Slot;
+    if (kind == Kind::Tap && count == 3) return kTap3Slot;
     return -1;
 }
 
@@ -158,6 +161,7 @@ bool parseStatusText(const std::string& text, Status& status, std::string& error
         p.kind = kind == "count"      ? PressRecord::Kind::Count
                  : kind == "long"     ? PressRecord::Kind::Long
                  : kind == "too_many" ? PressRecord::Kind::TooMany
+                 : kind == "tap"      ? PressRecord::Kind::Tap
                                       : PressRecord::Kind::None;
         p.count = static_cast<int>(readNumber(*press, "count", 0));
         if (!parseActionType(readText(*press, "action"), p.action)) p.action = ActionType::None;

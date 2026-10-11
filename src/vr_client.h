@@ -143,6 +143,38 @@ public:
      */
     bool readPointer(PointerSample& sample);
 
+    /**
+     * ヘッドセットをかぶって使っているか（GetTrackedDeviceActivityLevel が UserInteraction）。外して置くとしばらくして
+     * スタンバイになり、姿勢も取れなくなる。タップの判定で、姿勢を読み始める・やめるのに使う。
+     * @return つながっていて、かぶって使っていれば true
+     */
+    bool hmdInUse();
+
+    /**
+     * ヘッドセットの角速度を読む（GetDeviceToAbsoluteTrackingPose の vAngularVelocity。タップの判定に使う）。
+     * @param w 読めたときの書き込み先（rad/s、x・y・z）
+     * @return つながっていて、姿勢が正しく（bPoseIsValid）追跡できている（TrackingResult_Running_OK）なら true
+     */
+    bool readHmdAngularVelocity(double w[3]);
+
+    /**
+     * ヘッドセットの姿勢が正しく取れているか（GetDeviceToAbsoluteTrackingPose の bPoseIsValid と
+     * TrackingResult_Running_OK）。視点のリセットの前に確かめる。
+     * @return つながっていて、姿勢が取れていれば true
+     */
+    bool hmdTracking();
+
+    /**
+     * 視点をリセットする（今向いている方を正面にする）。ダッシュボードの「中央に戻す」やコントローラーの
+     * システムボタンの長押しと同じく、IVRChaperone::ResetZeroPose を Standing・Seated の順に呼ぶ
+     * （Standing だけでは Seated の基準は変わらない）。床の高さは変わらない。
+     * ファイルは書かない（ChaperoneSetup・CommitWorkingCopy は使わない。SteamVR が自分で覚える）。
+     * 終わると VREvent_StandingZeroPoseReset / VREvent_SeatedZeroPoseReset が来る（pollEvents() がログに出す）。
+     * @param error 失敗したときの理由
+     * @return 頼めたら true
+     */
+    bool resetZeroPose(std::string& error);
+
     /** つながっていれば切る（VR_Shutdown）。 */
     void shutdown();
 

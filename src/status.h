@@ -14,26 +14,28 @@ enum class AppState {
     Missing,  ///< 入っていない
 };
 
-/** 最後に確定した押し方と、その結果。 */
+/** 最後に確定した押し方（aux の押し方かヘッドセットのタップ）と、その結果。 */
 struct PressRecord {
     enum class Kind {
         None,     ///< まだ押していない
         Count,    ///< 1〜5 回押し
         Long,     ///< 長押し
         TooMany,  ///< 6 回以上（何もしない）
+        Tap,      ///< ヘッドセットの 2 回・3 回タップ（count に回数）
     };
     Kind kind = Kind::None;
-    int count = 0;                        ///< 回数（Count・TooMany）
+    int count = 0;                        ///< 回数（Count・TooMany・Tap）
     ActionType action = ActionType::None; ///< 割り当ててあったアクション
     bool ok = true;                       ///< 成功したか
     std::string value;   ///< 結果の値: "muted" / "unmuted"、明るさの %、"on" / "off"、"shown" / "hidden"（無ければ空）
     std::string reason;  ///< 失敗の理由: "no_steamvr" / "room_view_api" / "no_command" / "app_missing" / "app_stopped" / "failed"
     std::string detail;  ///< ログ用の説明（日本語）
+    std::string track;   ///< 音楽の操作のとき、曲名（視界のお知らせ用。状態ファイルには書かない）
     long long at = 0;    ///< 確定した時刻（Unix 時間の秒）
 
     /**
      * 押し方の番号。
-     * @return 0〜4 が 1〜5 回押し、5 が長押し、それ以外は -1
+     * @return 0〜4 が 1〜5 回押し、5 が長押し、6 が 2 回タップ、7 が 3 回タップ、それ以外は -1
      */
     int slot() const;
 };

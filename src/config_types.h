@@ -7,7 +7,9 @@ enum class Language { Ja, En };
 /**
  * 押し方に割り当てるアクションの種類。
  * 種類を足すときは、ここ・config.cpp の kActionSpecs・i18n.cpp の actionLabel・icons.cpp の iconForAction・
- * hud_message.cpp・actions.cpp の prepareAction に 1 行ずつ足す（設定パネルの選択肢は kActionSpecs の順に並ぶ）。
+ * hud_message.cpp・actions.cpp の prepareAction に 1 行ずつ足す（設定パネルの選択肢は kActionSpecs の順に並ぶ。
+ * 音楽の操作は media.h の isMediaAction にも足す。パネルでは「音楽」の側に並ぶ）。
+ * 設定ファイル・状態ファイルには名前（kActionSpecs）で書くので、ここの並びの数は外に出ない。
  */
 enum class ActionType {
     None,               ///< 何もしない
@@ -17,6 +19,10 @@ enum class ActionType {
     Screenshot,         ///< スクリーンショット（IVRScreenshots::RequestScreenshot で VR の画面を PNG に）
     PerfOverlayToggle,  ///< frame-perf-overlay の表示切り替え（SIGUSR1）
     DashboardOpen,      ///< ダッシュボードを開く（IVROverlay::ShowDashboard）
+    Recenter,           ///< 視点のリセット（今向いている方を正面にする。IVRChaperone::ResetZeroPose。recenter.h）
     OriginalAux,        ///< aux の元の動き（KEY_SELECT の押して離すを gpio-keys に書いて SteamVR に届ける。keymap.h）
+    MediaPlayPause,     ///< Frame で流している音楽・動画の再生・一時停止（MPRIS。media_control.h）
+    MediaNext,          ///< 次の曲（MPRIS の Next）
+    MediaPrevious,      ///< 前の曲（MPRIS の Previous）
     Command,            ///< argv をそのまま実行（シェルは通さない）
 };

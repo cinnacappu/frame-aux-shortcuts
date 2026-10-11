@@ -1,6 +1,6 @@
 // 押し方に割り当てたアクションの実行。
 // すぐ終わるもの（OpenVR の呼び出し・シグナル・コマンドの起動）はその場で、外部コマンドの終わりを待つもの
-// （wpctl）と通信するもの（room view）は、イベントループを止めないよう作業用スレッドで動かす。
+// （wpctl）と通信するもの（room view・音楽の操作）は、イベントループを止めないよう作業用スレッドで動かす。
 // スクリーンショットは頼むだけその場で行い、結果は SteamVR のイベントで受け取る（メインループが待つ）。
 #pragma once
 
@@ -16,10 +16,13 @@ class VrClient;
 struct ActionOutcome {
     bool ok = false;
     std::string value;   ///< 結果の値: "muted" / "unmuted"、明るさの %、"on" / "off"、"shown" / "hidden"、保存したファイル、
-                         ///< コマンドの名前、組み込みの OSC の送信なら "osc:<アドレス>"
+                         ///< コマンドの名前、組み込みの OSC の送信なら "osc:<アドレス>"、音楽の操作なら "playing" / "paused" /
+                         ///< "next" / "previous"（media.h）、視点のリセットなら "recentered" / "repeated"（recenter.h）
     std::string reason;  ///< 失敗の理由のコード: "no_steamvr" / "room_view_api" / "no_command" / "app_missing" / "app_stopped" /
-                         ///< "no_pc"（OSC の送り先の PC が見つからない）/ "failed"
+                         ///< "no_pc"（OSC の送り先の PC が見つからない）/ "no_player" / "media_unsupported" /
+                         ///< "not_worn" / "not_tracking"（視点のリセット）/ "failed"
     std::string detail;  ///< ログ用の説明
+    std::string track;   ///< 音楽の操作のとき、曲名（分かれば。視界のお知らせの 2 行目に出す。ログには書かない）
 };
 
 /** 作業用スレッドで動かす処理。 */
@@ -67,7 +70,7 @@ ActionOutcome screenshotTimedOut(const PendingScreenshot& shot);
 
 /**
  * アクションを始める。すぐ終わるものはその場で実行し、待つものは作業用スレッドで動かす処理を返す。
- * OpenVR を使うもの（明るさ・ダッシュボード・room view の状態の判断）はここ（メインスレッド）で呼ぶ。
+ * OpenVR を使うもの（明るさ・ダッシュボード・視点のリセット・room view の状態の判断）はここ（メインスレッド）で呼ぶ。
  * @param action 割り当て
  * @param config 設定（明るさの段・スクリーンショットの保存先）
  * @param vr SteamVR とのつながり（つながっていなければ、OpenVR を使うアクションは失敗）

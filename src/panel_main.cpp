@@ -82,7 +82,7 @@ struct Options {
     int previewCommands = -1;    ///< 見本のコマンドをこの数だけ入れる（-1 なら設定ファイルのまま）
     bool previewFolder = false;  ///< 見本のフォルダのコマンドを 2 つ入れる
     int previewAssignCommand = 0;  ///< 5 回押しにこの番号の見本のコマンドを割り当てる（0 なら割り当てない）
-    std::string previewPicker;   ///< 割り当ての列の側（actions / commands:<ページ>）。空なら選んだカードに合わせる
+    std::string previewPicker;   ///< 割り当ての列の側（actions / media / commands:<ページ>）。空なら選んだカードに合わせる
     std::string previewSheet;    ///< シート（add / edit / invalid / quote / tested / failed）
     std::string previewDelete;   ///< 「消す」の 2 回目を待つコマンドの id
     std::string previewTested;   ///< 一覧で［試す］を押したコマンドの id（:fail で失敗）
@@ -95,6 +95,9 @@ struct Options {
     std::string previewKeyboard = "installed";  ///< frame-jp-keyboard の状態（running / installed / missing）
     std::string previewBusy;     ///< Konsole で実行中にするアプリの呼び名（, 区切り。menu でメニュー）
     std::string previewLaunch;   ///< 確認に出す開けなかった理由（busy / nodisplay / nokonsole / failed）
+    bool previewTaps = false;    ///< タップに見本の割り当て（2 回 = パススルー・3 回 = スクリーンショット）を入れ、最後を 2 回タップにする
+    bool previewMedia = false;   ///< 音楽の操作の見本の割り当て（1 回押し = 再生・一時停止、4 回押し = 次の曲、2 回タップ = 前の曲）
+    bool previewRecenter = false;  ///< 視点のリセットの見本の割り当て（長押し・2 回タップ）。さっきの押し方を長押しにする
     bool keyboardBuffered = false;  ///< SteamVR のキーボードを今までの方式（Minimal でない）で開く
 };
 
@@ -158,7 +161,7 @@ void printUsage() {
         "                       すでに動いていれば、そちらのタブを開いて終わる\n"
         "  --dump-png PATH      OpenVR なしで設定パネルの画像を PNG に書き出して終わる（見た目の確認用）\n"
         "      --tab T          タブ（assign / brightness / press / commands / display / app。既定 assign）\n"
-        "      --slot N         割り当てタブで選んでおくカード（0〜4 が 1〜5 回押し、5 が長押し）\n"
+        "      --slot N         割り当てタブで選んでおくカード（0〜4 が 1〜5 回押し、5 が長押し、6・7 が 2・3 回タップ）\n"
         "      --language L     言語（ja / en。既定は設定ファイルの言語）\n"
         "      --preview-update S     更新の帯（uptodate / checking / available / manual / confirm / installing /\n"
         "                             installed / checkfailed / installfailed / unknown）\n"
@@ -166,11 +169,16 @@ void printUsage() {
         "      --preview-daemon S     本体（running / standby / handedback / stopped）\n"
         "      --preview-autostart S  自動起動（enabled / disabled / notinstalled / busy / failed）\n"
         "      --preview-unmuted      マイクがミュートでないとして描く（既定はミュート中）\n"
+        "      --preview-taps         タップに見本の割り当て（2 回 = パススルー・3 回 = スクリーンショット）を入れ、\n"
+        "                             さっきの押し方を 2 回タップにする\n"
+        "      --preview-media        音楽の操作の見本の割り当て（1 回押し = 再生・一時停止、4 回押し = 次の曲、\n"
+        "                             2 回タップ = 前の曲）を入れる\n"
+        "      --preview-recenter     視点のリセットを長押しと 2 回タップに割り当て、さっきの押し方を長押しにする\n"
         "      --preview-bg-off       「パネルを閉じても aux を使う」をオフとして描く\n"
         "      --preview-quit / --preview-reset  確認の 2 回目を待っている状態で描く\n"
         "      --preview-commands N   見本のコマンドを N 個にする（--preview-folder でフォルダの分を 2 つ足す）\n"
         "      --preview-assign-command K  5 回押しに見本の K 番目のコマンドを割り当てる\n"
-        "      --preview-picker S     割り当ての列（actions / commands:<ページ（0 から）>）\n"
+        "      --preview-picker S     割り当ての列（actions / media / commands:<ページ（0 から）>）\n"
         "      --preview-sheet S      コマンドのシート（add / edit / invalid / quote / tested / failed /\n"
         "                             presets / presets-nopc / presets-manual / presets-badip / presets-sent /\n"
         "                             presets-speaker）\n"
@@ -213,6 +221,12 @@ bool parseOptions(int argc, char** argv, Options& options) {
             options.tabGiven = true;
         } else if (arg == "--slot" && hasNext) {
             options.slot = std::atoi(argv[++i]);
+        } else if (arg == "--preview-taps") {
+            options.previewTaps = true;
+        } else if (arg == "--preview-media") {
+            options.previewMedia = true;
+        } else if (arg == "--preview-recenter") {
+            options.previewRecenter = true;
         } else if (arg == "--language" && hasNext) {
             options.language = argv[++i];
         } else if (arg == "--preview-update" && hasNext) {
@@ -394,7 +408,7 @@ int runDumpPng(const Options& options) {
     fonts.load(kFontRegular, kFontBold);
     SettingsPanel panel(fonts);
     panel.setTab(parseTab(options.tab));
-    panel.setSelectedSlot(std::max(0, std::min(kLongPressSlot, options.slot)));
+    panel.setSelectedSlot(std::max(0, std::min(kSlotCount - 1, options.slot)));
     if (options.previewQuit) panel.armQuitForPreview();
     if (options.previewReset) panel.armResetForPreview();
     if (options.previewUpdate == "confirm") panel.armUpdateConfirmForPreview();
@@ -421,6 +435,30 @@ int runDumpPng(const Options& options) {
     s.lastPress.action = config.press[1].type;
     s.lastPress.value = "60";
     s.lastPress.at = view.now - 60;
+    if (options.previewTaps) {
+        config.tap[0].type = ActionType::RoomViewToggle;
+        config.tap[1].type = ActionType::Screenshot;
+        s.lastPress.kind = PressRecord::Kind::Tap;
+        s.lastPress.action = config.tap[0].type;
+        s.lastPress.value = "on";
+    }
+    if (options.previewMedia) {
+        config.press[0].type = ActionType::MediaPlayPause;
+        config.press[3].type = ActionType::MediaNext;
+        config.tap[0].type = ActionType::MediaPrevious;
+        s.lastPress.kind = PressRecord::Kind::Count;
+        s.lastPress.count = 1;
+        s.lastPress.action = ActionType::MediaPlayPause;
+        s.lastPress.value = "paused";
+    }
+    if (options.previewRecenter) {
+        config.longPress.type = ActionType::Recenter;
+        config.tap[0].type = ActionType::Recenter;
+        s.lastPress.kind = PressRecord::Kind::Long;
+        s.lastPress.count = 0;
+        s.lastPress.action = ActionType::Recenter;
+        s.lastPress.value = "recentered";
+    }
     const std::string& a = options.previewAutostart;
     view.autostart.state = a == "disabled"       ? AutostartStatus::State::Disabled
                            : a == "notinstalled" ? AutostartStatus::State::NotInstalled
@@ -481,10 +519,11 @@ int runDumpPng(const Options& options) {
         config.press[0].type = ActionType::Command;
         config.press[0].commandId = "c1";
     }
-    if (options.previewPicker == "actions") panel.setPickerForPreview(false, 0);
+    if (options.previewPicker == "actions") panel.setPickerForPreview(SettingsPanel::PickerSide::Actions, 0);
+    if (options.previewPicker == "media") panel.setPickerForPreview(SettingsPanel::PickerSide::Media, 0);
     if (options.previewPicker.rfind("commands", 0) == 0) {
         const size_t colon = options.previewPicker.find(':');
-        panel.setPickerForPreview(true, colon == std::string::npos ? 0 : std::atoi(options.previewPicker.c_str() + colon + 1));
+        panel.setPickerForPreview(SettingsPanel::PickerSide::Commands, colon == std::string::npos ? 0 : std::atoi(options.previewPicker.c_str() + colon + 1));
     }
     panel.render(config, view);  // 一覧（並び）を覚えさせる
     if (!options.previewSheet.empty()) {

@@ -57,11 +57,16 @@ struct UiText {
     const char* actShot;
     const char* actPerf;
     const char* actDash;
+    const char* actRecenter;      ///< 視点のリセット
     const char* actOriginal;      ///< aux の元の動き
+    const char* actMediaPlayPause;///< 再生・一時停止
+    const char* actMediaNext;     ///< 次の曲
+    const char* actMediaPrevious; ///< 前の曲
     const char* actCmd;
     const char* actNone;
     // ---- 割り当てタブ ----
     const char* recentFormat;     ///< さっき押した %s（%s は時刻）
+    const char* recentTapFormat;  ///< さっきタップした %s（タップのカード。%s は時刻）
     const char* stMicMuted;
     const char* stMicOn;
     const char* stMicUnknown;
@@ -76,14 +81,20 @@ struct UiText {
     const char* stPerfUnknown;
     const char* stDash;
     const char* stOriginal;        ///< aux の元の動きのカードの 2 行目
+    const char* stRecenter;        ///< 視点のリセットのカードの 2 行目（今向いている方を正面にします）
+    const char* stMedia;           ///< 音楽の操作のカードの 2 行目（Chrome などで流している音楽）
     const char* stCmdMissing;      ///< 割り当てたコマンドがもう無い
     const char* missingCommand;    ///< 消えたコマンド（カードの名前）
     const char* stNone;
     const char* assignHeadingFormat;  ///< %s に割り当てる
     const char* assignHint;
+    const char* tapNoteTitle;         ///< ヘッドセットのタップ（タップのカードの横の説明の見出し）
+    const char* tapNote;              ///< かぶっている間だけ使える・横を軽くたたく
     const char* chipMissing;          ///< 入っていない
     const char* pickerActions;        ///< アクション（割り当ての列の切り替え）
     const char* pickerCommandsFormat; ///< コマンド（%s）（%s は件数）
+    const char* pickerMedia;          ///< 音楽（割り当ての列の切り替え）
+    const char* mediaNote;            ///< 音楽の側の説明（MPRIS に対応したアプリ・PC の音は対象外）
     const char* cmdAdd;               ///< ＋ コマンドを足す
     // ---- 明るさタブ ----
     const char* brightHeading;
@@ -259,6 +270,11 @@ struct UiText {
     const char* hudCmd;
     const char* hudVrcVoice;          ///< VRChat にミュートの切り替えを送りました
     const char* hudOscFormat;         ///< OSC を送りました: %s
+    const char* hudMediaPlaying;      ///< 再生（2 行目は曲名）
+    const char* hudMediaPaused;       ///< 一時停止
+    const char* hudMediaNext;         ///< 次の曲
+    const char* hudMediaPrevious;     ///< 前の曲
+    const char* hudRecenter;          ///< 視点をリセットしました
     const char* failMic;
     const char* failBright;
     const char* failPass;
@@ -269,12 +285,20 @@ struct UiText {
     const char* failCmd;
     const char* failVrcVoice;         ///< VRChat に送れません
     const char* failOsc;              ///< OSC を送れません
+    const char* failMediaPlayPause;   ///< 再生・一時停止できません
+    const char* failMediaNext;        ///< 次の曲に進めません
+    const char* failMediaPrevious;    ///< 前の曲に戻れません
+    const char* failRecenter;         ///< 視点をリセットできません
     const char* reasonNoSteamVr;
     const char* reasonRoomViewApi;
     const char* reasonPerfMissing;
     const char* reasonPerfStopped;
     const char* reasonNoCommand;
     const char* reasonNoPc;           ///< つないでいる PC が見つかりません
+    const char* reasonNoPlayer;       ///< 再生しているアプリが見つかりません
+    const char* reasonMediaUnsupported;  ///< このアプリでは使えません
+    const char* reasonNotWorn;        ///< ヘッドセットをかぶっている間だけ使えます（視点のリセット）
+    const char* reasonNotTracking;    ///< ヘッドセットの位置が取れていません（視点のリセット）
     const char* reasonFailed;
     const char* subSep;               ///< 押し方と理由の間（・）
     // ---- 視界の表示（カーソルのときに aux を元に戻す・戻した） ----
@@ -291,12 +315,20 @@ struct UiText {
 const UiText& uiText(Language language);
 
 /**
- * 押し方の名前（「2 回押し」「長押し」）。
+ * 押し方の名前（「2 回押し」「長押し」「2 回タップ」）。視界のお知らせ・割り当ての見出し・コマンドの割り当て先などで使う短い名前。
  * @param language 言語
- * @param slot 0〜4 が 1〜5 回押し、5 が長押し
+ * @param slot 0〜4 が 1〜5 回押し、5 が長押し、6 が 2 回タップ、7 が 3 回タップ
  * @return 名前
  */
 std::string slotLabel(Language language, int slot);
+
+/**
+ * 割り当てのカードに出す押し方の名前（タップは「ヘッドセットを 2 回タップ」。aux の押し方は slotLabel と同じ）。
+ * @param language 言語
+ * @param slot slotLabel と同じ
+ * @return 名前
+ */
+std::string slotTitle(Language language, int slot);
 
 /**
  * アクションの種類の名前（「マイクのミュート」など）。

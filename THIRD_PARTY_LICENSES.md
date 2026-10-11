@@ -37,7 +37,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-- Line icons (`src/icons.cpp`): drawn from coordinates in the code; some follow Feather (https://github.com/feathericons/feather; the camera uses the same coordinates) and Lucide (https://github.com/lucide-icons/lucide; the sun). Their licenses, to be safe:
+- Line icons (`src/icons.cpp`): drawn from coordinates in the code; some follow Feather (https://github.com/feathericons/feather; the camera, play, pause and skip icons use the same coordinates) and Lucide (https://github.com/lucide-icons/lucide; the sun). Their licenses, to be safe:
 
 ```
 The MIT License (MIT)
@@ -90,10 +90,11 @@ The programs link to, run or read these copies already on the Steam Frame (check
 | `libopenvr_api.so` (from SteamVR) | linked | BSD-3-Clause |
 | cairo 1.18.0, FreeType 2.13.2 | linked; drawing and fonts | LGPL-2.1 or MPL-1.1; FTL or GPL-2.0 |
 | Vulkan loader 1.4.309 | linked | Apache-2.0 |
+| libsystemd 257 (sd-bus) | linked; D-Bus for the music controls (MPRIS) | LGPL-2.1-or-later |
 | glibc 2.39, GCC runtime (`libstdc++`, `libgcc_s`) | linked | LGPL-2.1-or-later; GPL-3.0 with the GCC Runtime Library Exception |
 | Noto Sans CJK | font read at run time | SIL OFL 1.1 |
 | `wpctl` (WirePlumber), `pw-play` (PipeWire) | run for mic mute and sounds | MIT |
 | `systemctl`, `systemd-run`; curl, tar, `sha256sum`, Python 3 | run for autostart and by the updater | LGPL-2.1+; curl, GPL-3.0+, PSF |
 | SteamVR's dashboard sounds (`.wav`) | default feedback sounds, played from SteamVR's folder | © Valve; not redistributed |
 
-They are used as shared libraries and programs from the Steam Frame and can be replaced with any compatible version. The text of the LGPL 2.1 (cairo, glibc) is in [`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt). Portions of this software are based in part on the work of the FreeType Team (https://freetype.org).
+They are used as shared libraries and programs from the Steam Frame and can be replaced with any compatible version. The text of the LGPL 2.1 (cairo, libsystemd, glibc) is in [`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt). Portions of this software are based in part on the work of the FreeType Team (https://freetype.org).

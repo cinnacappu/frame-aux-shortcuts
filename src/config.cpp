@@ -31,10 +31,23 @@ const std::vector<ActionSpec> kActionSpecs = {
     {ActionType::Screenshot, "screenshot", true},
     {ActionType::PerfOverlayToggle, "perf_overlay_toggle", false},
     {ActionType::DashboardOpen, "dashboard_open", true},
+    {ActionType::Recenter, "recenter", true},
     {ActionType::OriginalAux, "original_aux", false},
+    {ActionType::MediaPlayPause, "media_play_pause", false},
+    {ActionType::MediaNext, "media_next", false},
+    {ActionType::MediaPrevious, "media_previous", false},
     {ActionType::Command, "command", false},
     {ActionType::None, "none", false},
 };
+
+/**
+ * タップの割り当ての設定ファイルでのキー。
+ * @param index 0 が 2 回タップ、1 が 3 回タップ
+ * @return "tap_2" / "tap_3"
+ */
+std::string tapKey(int index) {
+    return "tap_" + std::to_string(index + 2);
+}
 
 /** version 1 にあって、もう無いアクションの名前。読むときは none にする。 */
 constexpr const char* kRemovedEchoCancel = "echo_cancel_toggle";
@@ -509,6 +522,7 @@ bool parseConfigText(const std::string& text, Config& out, std::vector<std::stri
         if (actions->isObject()) {
             std::vector<std::string> known = {"long_press"};
             for (int i = 1; i <= kMaxPressCount; ++i) known.push_back("press_" + std::to_string(i));
+            for (int i = 0; i < kTapSlotCount; ++i) known.push_back(tapKey(i));
             warnUnknownKeys(*actions, known, "actions.", warnings);
             for (int i = 1; i <= kMaxPressCount; ++i) {
                 const std::string key = "press_" + std::to_string(i);
@@ -518,6 +532,12 @@ bool parseConfigText(const std::string& text, Config& out, std::vector<std::stri
             }
             if (const JsonValue* value = actions->get("long_press")) {
                 readAction(*value, "actions.long_press", config.longPress, oldLevels, config.commands, warnings);
+            }
+            // ヘッドセットのタップ（0.2.1 までの設定には無い。無ければ none のまま）
+            for (int i = 0; i < kTapSlotCount; ++i) {
+                if (const JsonValue* value = actions->get(tapKey(i))) {
+                    readAction(*value, "actions." + tapKey(i), config.tap[i], oldLevels, config.commands, warnings);
+                }
             }
         } else {
             warnings.push_back("actions は {\"press_1\": ..., \"long_press\": ...} で書いてください");
@@ -573,7 +593,9 @@ std::string configToJson(const Config& config) {
     for (int i = 0; i < kMaxPressCount; ++i) {
         out << "    \"press_" << (i + 1) << "\": " << actionJson(config.press[i]) << ",\n";
     }
-    out << "    \"long_press\": " << actionJson(config.longPress) << "\n"
+    out << "    \"long_press\": " << actionJson(config.longPress);
+    for (int i = 0; i < kTapSlotCount; ++i) out << ",\n    \"" << tapKey(i) << "\": " << actionJson(config.tap[i]);
+    out << "\n"
         << "  }\n"
         << "}\n";
     return out.str();

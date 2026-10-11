@@ -38,9 +38,10 @@ struct BadgeStyle {
  * @param pen 描画の道具
  * @param toast 中身
  * @param style 寸法
+ * @param maxWidth 0 より大きければ、drawToast と同じくこの幅に収めた（文字を小さくし、入らなければ「…」にした）幅
  * @return 幅（px）
  */
-double measureToast(const Pen& pen, const HudToast& toast, const ToastStyle& style);
+double measureToast(const Pen& pen, const HudToast& toast, const ToastStyle& style, double maxWidth = 0);
 
 /**
  * お知らせのピルを描く。
@@ -49,7 +50,7 @@ double measureToast(const Pen& pen, const HudToast& toast, const ToastStyle& sty
  * @param style 寸法
  * @param x 左
  * @param y 上
- * @param maxWidth これより広ければ文字を小さくする
+ * @param maxWidth これより広ければ文字を小さくする（最小の大きさでも入らなければ、後ろを「…」にする。長い曲名など）
  */
 void drawToast(const Pen& pen, const HudToast& toast, const ToastStyle& style, double x, double y, double maxWidth);
 

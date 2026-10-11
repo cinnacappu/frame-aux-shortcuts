@@ -21,6 +21,18 @@ void destroyFtFace(void* face) {
 
 const cairo_user_data_key_t kFtFaceKey {};
 
+/**
+ * UTF-8 の 1 文字の長さ（バイト）。
+ * @param c 先頭のバイト
+ * @return 1〜4
+ */
+size_t utf8CharLength(unsigned char c) {
+    if (c < 0x80) return 1;
+    if ((c >> 5) == 0x6) return 2;
+    if ((c >> 4) == 0xE) return 3;
+    return 4;
+}
+
 }  // namespace
 
 FontSet::FontSet() {
@@ -130,6 +142,17 @@ void Pen::dot(double x, double y, Color c) const {
 double fitSize(const Pen& pen, const std::string& text, double size, double minSize, double maxWidth, bool bold) {
     while (size > minSize && pen.measure(text, size, bold) > maxWidth) size -= 1;
     return size;
+}
+
+std::string ellipsize(const Pen& pen, const std::string& text, double size, bool bold, double maxW) {
+    if (pen.measure(text, size, bold) <= maxW) return text;
+    std::vector<size_t> cuts;
+    for (size_t i = 0; i < text.size(); i += utf8CharLength(static_cast<unsigned char>(text[i]))) cuts.push_back(i);
+    for (size_t n = cuts.size(); n > 0; --n) {
+        const std::string candidate = text.substr(0, cuts[n - 1]) + "…";
+        if (pen.measure(candidate, size, bold) <= maxW) return candidate;
+    }
+    return "…";
 }
 
 double centerBaseline(double top, double h, double size) {

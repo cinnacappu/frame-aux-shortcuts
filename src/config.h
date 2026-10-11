@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-/** 1 つの押し方に割り当てるアクション。 */
+/** 1 つの押し方（aux の押し方かヘッドセットのタップ）に割り当てるアクション。 */
 struct Action {
     ActionType type = ActionType::None;
     std::string commandId;  ///< command のとき、実行するコマンドの id（設定の commands か、フォルダの "dir:<ファイル名>"）
@@ -39,10 +39,30 @@ const ActionSpec& actionSpec(ActionType type);
 
 /** 回数押しの最大（これを超えたら無視する）。 */
 constexpr int kMaxPressCount = 5;
-/** 押し方の数（1〜5 回押しと長押し）。設定パネルでは 0〜4 が回数押し、5 が長押し。 */
-constexpr int kSlotCount = kMaxPressCount + 1;
 /** 長押しの番号。 */
 constexpr int kLongPressSlot = kMaxPressCount;
+/** ヘッドセットの 2 回タップの番号。 */
+constexpr int kTap2Slot = kLongPressSlot + 1;
+/** ヘッドセットの 3 回タップの番号。 */
+constexpr int kTap3Slot = kTap2Slot + 1;
+/** タップの種類の数（2 回・3 回）。 */
+constexpr int kTapSlotCount = 2;
+/** aux の押し方の数（1〜5 回押しと長押し）。 */
+constexpr int kAuxSlotCount = kMaxPressCount + 1;
+/**
+ * 割り当ての数（aux の押し方とヘッドセットのタップ）。設定パネルでは 0〜4 が回数押し、5 が長押し、
+ * 6 が 2 回タップ、7 が 3 回タップ。
+ */
+constexpr int kSlotCount = kAuxSlotCount + kTapSlotCount;
+
+/**
+ * タップの番号か。
+ * @param slot 番号
+ * @return 2 回・3 回タップなら true
+ */
+constexpr bool isTapSlot(int slot) {
+    return slot == kTap2Slot || slot == kTap3Slot;
+}
 
 /** 設定ファイルの形の版（3 からコマンドは commands に登録して id で割り当てる）。 */
 constexpr int kConfigVersion = 3;
@@ -100,18 +120,28 @@ struct Config {
     std::string commandFolder;    ///< コマンドのフォルダ（設定ファイルと同じフォルダの commands/。ファイルには書かない）
     Action longPress;             ///< 長押し
     Action press[kMaxPressCount]; ///< press[0] が 1 回押し … press[4] が 5 回押し
+    Action tap[kTapSlotCount];    ///< tap[0] がヘッドセットの 2 回タップ、tap[1] が 3 回タップ（既定はどちらも none）
 
     /** 既定の割り当てを入れる（言語はシステムの言語）。 */
     Config();
 
     /**
      * 押し方の番号から割り当てを引く。
-     * @param slot 0〜4 が 1〜5 回押し、5 が長押し
+     * @param slot 0〜4 が 1〜5 回押し、5 が長押し、6 が 2 回タップ、7 が 3 回タップ
      * @return 割り当て
      */
-    Action& slot(int slot) { return slot >= kLongPressSlot ? longPress : press[slot < 0 ? 0 : slot]; }
+    Action& slot(int slot) {
+        if (slot >= kTap2Slot) return tap[slot >= kTap3Slot ? 1 : 0];
+        return slot >= kLongPressSlot ? longPress : press[slot < 0 ? 0 : slot];
+    }
     /** @copydoc slot */
-    const Action& slot(int slot) const { return slot >= kLongPressSlot ? longPress : press[slot < 0 ? 0 : slot]; }
+    const Action& slot(int slot) const {
+        if (slot >= kTap2Slot) return tap[slot >= kTap3Slot ? 1 : 0];
+        return slot >= kLongPressSlot ? longPress : press[slot < 0 ? 0 : slot];
+    }
+
+    /** @return 2 回・3 回タップのどちらかに割り当てがあれば true（無ければヘッドセットの姿勢を読まない） */
+    bool tapsAssigned() const { return tap[0].type != ActionType::None || tap[1].type != ActionType::None; }
 };
 
 /**

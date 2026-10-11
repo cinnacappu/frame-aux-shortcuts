@@ -1,6 +1,8 @@
 // 画面に出す文言の表の中身（設定パネル・視界の表示）。
 #include "i18n.h"
 
+#include "config.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -79,10 +81,15 @@ UiText makeJapanese() {
     t.actShot = "スクリーンショット";
     t.actPerf = "パフォーマンス表示";
     t.actDash = "ダッシュボード";
+    t.actRecenter = "視点のリセット";
     t.actOriginal = "aux の元の動き";
+    t.actMediaPlayPause = "再生・一時停止";
+    t.actMediaNext = "次の曲";
+    t.actMediaPrevious = "前の曲";
     t.actCmd = "コマンド";
     t.actNone = "なし";
     t.recentFormat = "さっき押した %s";
+    t.recentTapFormat = "さっきタップ %s";
     t.stMicMuted = "いま ミュート中";
     t.stMicOn = "いま オン";
     t.stMicUnknown = "ミュートを切り替えます";
@@ -97,14 +104,20 @@ UiText makeJapanese() {
     t.stPerfUnknown = "表示を切り替えます";
     t.stDash = "ダッシュボードを開きます";
     t.stOriginal = "元の 1 回押し（開く・クリック）";
+    t.stRecenter = "今向いている方を正面にします";
+    t.stMedia = "Chrome などで流している音楽";
     t.stCmdMissing = "このコマンドはもうありません";
     t.missingCommand = "消えたコマンド";
     t.stNone = "何もしない";
     t.assignHeadingFormat = "%s に割り当てる";
     t.assignHint = "上のカードを選んでから、ここで決めます";
+    t.tapNoteTitle = "ヘッドセットのタップ";
+    t.tapNote = "かぶっている間だけ使えます。ヘッドセットの横を指で軽くトントンとたたきます";
     t.chipMissing = "入っていない";
     t.pickerActions = "アクション";
     t.pickerCommandsFormat = "コマンド（%s）";
+    t.pickerMedia = "音楽";
+    t.mediaNote = "Frame で流している音楽・動画を操作します（Chrome・Chromium など、MPRIS に対応したアプリ）。Steam Link でつないだ PC の音は操作できません";
     t.cmdAdd = "＋ コマンドを足す";
     t.cmdHeading = "コマンド";
     t.cmdHint = "自分で用意したコマンドを登録しておくと、「割り当て」で押し方に選べます";
@@ -271,6 +284,11 @@ UiText makeJapanese() {
     t.hudCmd = "コマンドを実行しました";
     t.hudVrcVoice = "VRChat にミュートの切り替えを送りました";
     t.hudOscFormat = "OSC を送りました: %s";
+    t.hudMediaPlaying = "再生";
+    t.hudMediaPaused = "一時停止";
+    t.hudMediaNext = "次の曲";
+    t.hudMediaPrevious = "前の曲";
+    t.hudRecenter = "視点をリセットしました";
     t.failMic = "マイクを切り替えられません";
     t.failBright = "明るさを変えられません";
     t.failPass = "パススルーを切り替えられません";
@@ -281,12 +299,20 @@ UiText makeJapanese() {
     t.failCmd = "コマンドを実行できません";
     t.failVrcVoice = "VRChat に送れません";
     t.failOsc = "OSC を送れません";
+    t.failMediaPlayPause = "再生・一時停止できません";
+    t.failMediaNext = "次の曲に進めません";
+    t.failMediaPrevious = "前の曲に戻れません";
+    t.failRecenter = "視点をリセットできません";
     t.reasonNoSteamVr = "SteamVR につながっていません";
     t.reasonRoomViewApi = "SteamVR の更新で使えなくなったかも";
     t.reasonPerfMissing = "frame-perf-overlay が入っていません";
     t.reasonPerfStopped = "frame-perf-overlay が動いていません";
     t.reasonNoCommand = "コマンドが見つかりません";
     t.reasonNoPc = "つないでいる PC が見つかりません";
+    t.reasonNoPlayer = "再生しているアプリが見つかりません";
+    t.reasonMediaUnsupported = "このアプリでは使えません";
+    t.reasonNotWorn = "ヘッドセットをかぶっている間だけ使えます";
+    t.reasonNotTracking = "ヘッドセットの位置が取れていません";
     t.reasonFailed = "うまくいきませんでした";
     t.subSep = "・";
     t.hudHandBack = "aux を従来の動きに戻しました";
@@ -323,10 +349,15 @@ UiText makeEnglish() {
     t.actShot = "Screenshot";
     t.actPerf = "Perf overlay";
     t.actDash = "Dashboard";
+    t.actRecenter = "Recenter view";
     t.actOriginal = "Original aux";
+    t.actMediaPlayPause = "Play / pause";
+    t.actMediaNext = "Next track";
+    t.actMediaPrevious = "Previous track";
     t.actCmd = "Command";
     t.actNone = "None";
     t.recentFormat = "Pressed %s";
+    t.recentTapFormat = "Tapped %s";
     t.stMicMuted = "Muted now";
     t.stMicOn = "On now";
     t.stMicUnknown = "Toggles mute";
@@ -341,14 +372,20 @@ UiText makeEnglish() {
     t.stPerfUnknown = "Shows or hides it";
     t.stDash = "Opens the SteamVR dashboard";
     t.stOriginal = "One normal press: open or click";
+    t.stRecenter = "Sets forward to where you face";
+    t.stMedia = "Music playing in Chrome, etc.";
     t.stCmdMissing = "This command no longer exists";
     t.missingCommand = "Missing command";
     t.stNone = "Does nothing";
     t.assignHeadingFormat = "Assign to %s";
     t.assignHint = "Pick a card above, then choose here";
+    t.tapNoteTitle = "Headset taps";
+    t.tapNote = "Works only while you wear the headset. Knock lightly on its side with a finger";
     t.chipMissing = "Not installed";
     t.pickerActions = "Actions";
     t.pickerCommandsFormat = "Commands (%s)";
+    t.pickerMedia = "Music";
+    t.mediaNote = "Controls music or video playing on the Frame (Chrome, Chromium and other apps that support MPRIS). Audio from a PC over Steam Link can't be controlled.";
     t.cmdAdd = "+ Add command";
     t.cmdHeading = "Commands";
     t.cmdHint = "Register your own commands, then pick them for a press in Assign";
@@ -515,6 +552,11 @@ UiText makeEnglish() {
     t.hudCmd = "Command started";
     t.hudVrcVoice = "Sent mute toggle to VRChat";
     t.hudOscFormat = "OSC sent: %s";
+    t.hudMediaPlaying = "Playing";
+    t.hudMediaPaused = "Paused";
+    t.hudMediaNext = "Next track";
+    t.hudMediaPrevious = "Previous track";
+    t.hudRecenter = "View recentered";
     t.failMic = "Couldn't toggle the mic";
     t.failBright = "Couldn't change brightness";
     t.failPass = "Couldn't toggle passthrough";
@@ -525,12 +567,20 @@ UiText makeEnglish() {
     t.failCmd = "Couldn't run the command";
     t.failVrcVoice = "Couldn't send to VRChat";
     t.failOsc = "Couldn't send OSC";
+    t.failMediaPlayPause = "Couldn't play or pause";
+    t.failMediaNext = "Couldn't skip to the next track";
+    t.failMediaPrevious = "Couldn't go to the previous track";
+    t.failRecenter = "Couldn't recenter the view";
     t.reasonNoSteamVr = "Not connected to SteamVR";
     t.reasonRoomViewApi = "A SteamVR update may have broken this";
     t.reasonPerfMissing = "frame-perf-overlay is not installed";
     t.reasonPerfStopped = "frame-perf-overlay is not running";
     t.reasonNoCommand = "Command not found";
     t.reasonNoPc = "No connected PC found";
+    t.reasonNoPlayer = "No app is playing media";
+    t.reasonMediaUnsupported = "Not supported by this app";
+    t.reasonNotWorn = "Works only while you wear the headset";
+    t.reasonNotTracking = "The headset isn't being tracked";
     t.reasonFailed = "Something went wrong";
     t.subSep = " · ";
     t.hudHandBack = "aux is back to normal";
@@ -571,10 +621,19 @@ const UiText& uiText(Language language) {
 
 std::string slotLabel(Language language, int slot) {
     const bool en = language == Language::En;
-    if (slot >= 5) return en ? "Long press" : "長押し";
+    if (slot == kTap2Slot) return en ? "Double tap" : "2 回タップ";
+    if (slot == kTap3Slot) return en ? "Triple tap" : "3 回タップ";
+    if (slot >= kLongPressSlot) return en ? "Long press" : "長押し";
     const int count = slot + 1;
     if (en) return count == 1 ? "1 press" : std::to_string(count) + " presses";
     return std::to_string(count) + " 回押し";
+}
+
+std::string slotTitle(Language language, int slot) {
+    const bool en = language == Language::En;
+    if (slot == kTap2Slot) return en ? "Tap headset twice" : "ヘッドセットを 2 回タップ";
+    if (slot == kTap3Slot) return en ? "Tap headset 3 times" : "ヘッドセットを 3 回タップ";
+    return slotLabel(language, slot);
 }
 
 const char* actionLabel(Language language, ActionType type) {
@@ -586,7 +645,11 @@ const char* actionLabel(Language language, ActionType type) {
         case ActionType::Screenshot: return t.actShot;
         case ActionType::PerfOverlayToggle: return t.actPerf;
         case ActionType::DashboardOpen: return t.actDash;
+        case ActionType::Recenter: return t.actRecenter;
         case ActionType::OriginalAux: return t.actOriginal;
+        case ActionType::MediaPlayPause: return t.actMediaPlayPause;
+        case ActionType::MediaNext: return t.actMediaNext;
+        case ActionType::MediaPrevious: return t.actMediaPrevious;
         case ActionType::Command: return t.actCmd;
         case ActionType::None: return t.actNone;
     }

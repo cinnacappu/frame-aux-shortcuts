@@ -1,7 +1,8 @@
 // 実機（gpio-keys・SteamVR・PipeWire）無しで動く単体テスト。ctest --test-dir build で動かす。
 // 押し方の判定・明るさの計算・設定の読み書きと version 1 からの移行・状態ファイル・外部の出力の読み取り・
 // WebSocket のフレーム・スクリーンショットの保存先・文言・視界のお知らせ・設定パネルの操作と当たり判定・
-// カーソルの判定（aux を SteamVR に返すか）を確かめる。
+// カーソルの判定（aux を SteamVR に返すか）・ヘッドセットのタップの判定・音楽の操作のアプリの選び方・
+// 視点のリセットの判断を確かめる。
 #include "brightness.h"
 #include "config.h"
 #include "draw.h"
@@ -9,14 +10,17 @@
 #include "hud_message.h"
 #include "i18n.h"
 #include "keyboard_text.h"
+#include "media.h"
 #include "osc.h"
 #include "panel_state.h"
 #include "press_detector.h"
+#include "recenter.h"
 #include "room_view.h"
 #include "runtime.h"
 #include "screenshot.h"
 #include "settings_panel.h"
 #include "status.h"
+#include "tap_detector.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -381,7 +385,7 @@ void testConfig() {
                 return false;
             }
         }
-        return actionSpecs().size() == 9 && actionSpecs().back().type == ActionType::None;
+        return actionSpecs().size() == 13 && actionSpecs().back().type == ActionType::None;
     }());
     {
         // 0.2.1 で足したもの（version は 3 のまま。書いていなければ既定値）
@@ -1604,6 +1608,584 @@ void testPanelState() {
     (void)rc;
 }
 
+/**
+ * タップの判定に、250 Hz の読み取りを流す。静止（x 軸に base の角速度）に、taps の時刻ごとに 1 回分の揺れ
+ * （y 軸に 0.6 rad/s を 1 回の読み取りだけ。角加速度は 150 rad/s²）を足す。
+ * @param d 判定
+ * @param t 今の時刻（µs）。untilUs まで進める
+ * @param untilUs 流し終える時刻（µs）
+ * @param taps 揺れの時刻（µs、4000 の倍数）
+ * @param base 静止の |ω|（頭を回し続けているなら大きくする）
+ * @param fireAt 確定したときの時刻の書き込み先（nullptr なら書かない）
+ * @return 確定した組の回数（1 や 4 以上も入る）
+ */
+std::vector<int> feedTaps(TapDetector& d, int64_t& t, int64_t untilUs, const std::vector<int64_t>& taps,
+                          double base = 0.02, std::vector<int64_t>* fireAt = nullptr) {
+    std::vector<int> out;
+    for (; t < untilUs; t += kTapSamplePeriodUs) {
+        double wy = 0.0;
+        for (const int64_t tap : taps) {
+            if (t == tap) wy = 0.6;
+        }
+        const TapResult result = d.onSample(t, base, wy, 0.0);
+        if (result.taps > 0) {
+            out.push_back(result.taps);
+            if (fireAt != nullptr) fireAt->push_back(t);
+        }
+    }
+    return out;
+}
+
+/** ヘッドセットのタップの判定・設定・状態ファイル・文言。 */
+void testTaps() {
+    const int64_t ms = 1000;  // µs
+    {
+        TapDetector d;
+        int64_t t = 0;
+        expect("タップ: 静止だけなら何もない", feedTaps(d, t, 1000 * ms, {}).empty());
+        expect("タップ: 2 回（間 0.25 秒）で 2 回タップ", feedTaps(d, t, 2500 * ms, {1200 * ms, 1452 * ms}) == std::vector<int>({2}));
+        expect("タップ: 3 回で 3 回タップ",
+               feedTaps(d, t, 5000 * ms, {3600 * ms, 3852 * ms, 4100 * ms}) == std::vector<int>({3}));
+        expect("タップ: 1 回だけは 1（何もしない）", feedTaps(d, t, 7000 * ms, {6000 * ms}) == std::vector<int>({1}));
+        expect("タップ: 間が 0.6 秒あくと別々の 1 回",
+               feedTaps(d, t, 10000 * ms, {8000 * ms, 8600 * ms}) == std::vector<int>({1, 1}));
+        expect("タップ: 4 回は 4（何もしない）",
+               feedTaps(d, t, 13000 * ms, {11000 * ms, 11252 * ms, 11500 * ms, 11752 * ms}) == std::vector<int>({4}));
+        std::vector<int64_t> at;
+        feedTaps(d, t, 15000 * ms, {14000 * ms, 14252 * ms}, 0.02, &at);
+        expect("タップ: 3 回タップを待つので、2 回タップは最後のタップの 0.45 秒あとに決まる",
+               at.size() == 1 && at[0] > 14252 * ms + kTapMaxGapUs && at[0] <= 14252 * ms + kTapMaxGapUs + kTapSamplePeriodUs);
+    }
+    {
+        TapDetector d;
+        int64_t t = 0;
+        expect("タップ: 頭を回している間（|ω| 1 rad/s）の揺れは数えない",
+               feedTaps(d, t, 3000 * ms, {1200 * ms, 1452 * ms, 1700 * ms}, 1.0).empty());
+        expect("タップ: 頭を止めてからなら数える", feedTaps(d, t, 5000 * ms, {4000 * ms, 4252 * ms}) == std::vector<int>({2}));
+    }
+    {
+        // 確定したら、その組の最後のタップから 1 秒は無視する
+        TapDetector d;
+        int64_t t = 0;
+        expect("タップ: 確定のあと 1 秒以内のタップは無視する",
+               feedTaps(d, t, 2400 * ms, {1000 * ms, 1252 * ms, 1900 * ms, 2152 * ms}) == std::vector<int>({2}));
+        expect("タップ: 1 秒たてばまた数える", feedTaps(d, t, 4000 * ms, {3000 * ms, 3252 * ms}) == std::vector<int>({2}));
+    }
+    {
+        // 3 回タップを使わないときは、2 回目でその場で確定し、3 回目は無視する
+        TapDetector d;
+        d.setFireDoubleImmediately(true);
+        int64_t t = 0;
+        std::vector<int64_t> at;
+        expect("タップ: 3 回タップを使わないときは 2 回目でその場で 2 回タップ",
+               feedTaps(d, t, 2000 * ms, {1000 * ms, 1252 * ms}, 0.02, &at) == std::vector<int>({2}) && at.size() == 1 &&
+                   at[0] == 1252 * ms);
+        expect("タップ: そのときの 3 回目は無視する（1 回にもならない）",
+               feedTaps(d, t, 4000 * ms, {3000 * ms, 3252 * ms, 3500 * ms}) == std::vector<int>({2}));
+    }
+    {
+        // 読み取りの間が空いても、途中の組は残す（メインループが一瞬止まっても 2 回・3 回を落とさない）
+        TapDetector d;
+        int64_t t = 0;
+        std::vector<int> got = feedTaps(d, t, 1100 * ms, {1000 * ms});
+        t += 40 * ms;  // 40 ms 読めなかった
+        const std::vector<int> after = feedTaps(d, t, 3000 * ms, {1300 * ms});
+        got.insert(got.end(), after.begin(), after.end());
+        expect("タップ: 読めない間があっても、前のタップと組にする", got == std::vector<int>({2}));
+        TapDetector waiting;
+        int64_t tw = 0;
+        std::vector<int> wgot = feedTaps(waiting, tw, 1300 * ms, {1000 * ms, 1252 * ms});
+        tw += 40 * ms;  // 2 回目のあと、3 回目を待っている間に 40 ms 読めなかった
+        const std::vector<int> wafter = feedTaps(waiting, tw, 3000 * ms, {});
+        wgot.insert(wgot.end(), wafter.begin(), wafter.end());
+        expect("タップ: 3 回目を待つ間に読めなくても、2 回で確定する", wgot == std::vector<int>({2}));
+        int64_t t2 = 0;
+        TapDetector fresh;
+        expect("タップ: 読み始めた直後（止まっていたか分からない）の揺れは数えない",
+               feedTaps(fresh, t2, 1000 * ms, {0, 8 * ms}).empty());
+        d.reset();
+        t = 10000 * ms;
+        expect("タップ: reset() のあとも数えられる", feedTaps(d, t, 12000 * ms, {11000 * ms, 11252 * ms}) == std::vector<int>({2}));
+        TapDetector same;
+        expect("タップ: 同じ時刻の読み取りは使わない", !same.onSample(0, 0, 0, 0).fired() && same.onSample(0, 0, 5, 0).taps == 0);
+    }
+    {
+        // 設定: 既定は none、書き出して読み直すと同じ
+        const Config defaults;
+        expect("設定の既定: 2 回・3 回タップは none（姿勢を読まない）",
+               defaults.tap[0].type == ActionType::None && defaults.tap[1].type == ActionType::None && !defaults.tapsAssigned());
+        Config config;
+        config.commands = {{"c1", "通知", {"notify-send", "a"}, false}};
+        config.tap[0].type = ActionType::RoomViewToggle;
+        config.tap[1] = {ActionType::Command, "c1"};
+        const std::string json = configToJson(config);
+        Config read;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(json, read, warnings, error);
+        expect("設定のタップ: 書き出して読み直せる・知らせなし", ok && warnings.empty() && configToJson(read) == json);
+        expect("設定のタップ: actions.tap_2 / tap_3 に書く",
+               json.find("\"tap_2\": { \"type\": \"room_view_toggle\" }") != std::string::npos &&
+                   json.find("\"tap_3\": { \"type\": \"command\", \"command\": \"c1\" }") != std::string::npos);
+        expect("設定のタップ: 中身も同じ",
+               read.tap[0].type == ActionType::RoomViewToggle && read.tap[1].type == ActionType::Command &&
+                   read.tap[1].commandId == "c1" && read.tapsAssigned());
+        expect("設定のタップ: slot(6)・slot(7) で引ける",
+               &read.slot(kTap2Slot) == &read.tap[0] && &read.slot(kTap3Slot) == &read.tap[1] &&
+                   &read.slot(kLongPressSlot) == &read.longPress);
+        Config old;
+        warnings.clear();
+        parseConfigText(R"({ "version": 3, "actions": { "press_1": "none" } })", old, warnings, error);
+        expect("設定のタップ: 書いていなければ none・知らせなし",
+               warnings.empty() && old.tap[0].type == ActionType::None && old.tap[1].type == ActionType::None);
+        warnings.clear();
+        parseConfigText(R"({ "actions": { "tap_3": "screenshot", "tap_4": "none" } })", old, warnings, error);
+        expect("設定のタップ: 片方だけでも読める・tap_4 は知らないキー",
+               old.tap[1].type == ActionType::Screenshot && old.tap[0].type == ActionType::None && old.tapsAssigned() &&
+                   warnings.size() == 1 && warnings[0].find("tap_4") != std::string::npos);
+        expect("設定のタップ: コマンドを消すとタップの割り当ても none", removeCommand(read, "c1") && read.tap[1].type == ActionType::None);
+    }
+    {
+        // 状態ファイル・文言・視界のお知らせ
+        Status status;
+        status.lastPress.kind = PressRecord::Kind::Tap;
+        status.lastPress.count = 2;
+        status.lastPress.action = ActionType::RoomViewToggle;
+        status.lastPress.value = "on";
+        status.lastPress.at = 1;
+        const std::string json = statusToJson(status);
+        Status read;
+        std::string error;
+        expect("状態: タップは kind \"tap\" と回数",
+               json.find("\"kind\": \"tap\", \"count\": 2") != std::string::npos && parseStatusText(json, read, error) &&
+                   read.lastPress.kind == PressRecord::Kind::Tap && read.lastPress.slot() == kTap2Slot);
+        PressRecord three;
+        three.kind = PressRecord::Kind::Tap;
+        three.count = 3;
+        PressRecord four = three;
+        four.count = 4;
+        expect("状態: 3 回タップの番号は 7、それ以外の回数は -1", three.slot() == kTap3Slot && four.slot() == -1);
+        expect("文言: タップの名前",
+               slotLabel(Language::Ja, kTap2Slot) == "2 回タップ" && slotLabel(Language::En, kTap3Slot) == "Triple tap" &&
+                   slotTitle(Language::Ja, kTap3Slot) == "ヘッドセットを 3 回タップ" &&
+                   slotTitle(Language::En, kTap2Slot) == "Tap headset twice" &&
+                   slotTitle(Language::Ja, kLongPressSlot) == slotLabel(Language::Ja, kLongPressSlot));
+        HudToast toast;
+        expect("視界のお知らせ: タップでも出す（2 行目はタップの名前）",
+               makeHudToast(status.lastPress, Language::Ja, toast) && toast.title == uiText(Language::Ja).hudPassOn &&
+                   toast.sub == "2 回タップ");
+    }
+    {
+        // 設定パネル: タップのカードと割り当て
+        using K = PanelAction::Kind;
+        Config config;
+        expect("パネル: 2 回タップに割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::RoomViewToggle), kTap2Slot}, config) &&
+                   config.tap[0].type == ActionType::RoomViewToggle);
+        expect("パネル: 3 回タップにコマンドを割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::Command), kTap3Slot, "c1"}, config) &&
+                   config.tap[1].type == ActionType::Command && config.tap[1].commandId == "c1");
+        expect("パネル: 範囲外の番号には割り当てない",
+               !applyPanelAction({K::Assign, static_cast<int>(ActionType::Screenshot), kSlotCount}, config));
+        config.tap[1] = Action();  // 下の列をアクションの側にする（コマンドを割り当てているとコマンドの側になる）
+        FontSet fonts;
+        fonts.load("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc");
+        SettingsPanel panel(fonts);
+        PanelView view;
+        view.daemon = PanelView::Daemon::Running;
+        for (const Language lang : {Language::Ja, Language::En}) {
+            config.language = lang;
+            panel.render(config, view);
+            double x = 0;
+            double y = 0;
+            double x2 = 0;
+            double y2 = 0;
+            const bool cards = panel.buttonCenter({K::SelectSlot, kTap2Slot, 0}, x, y) &&
+                               panel.buttonCenter({K::SelectSlot, kTap3Slot, 0}, x2, y2);
+            double ax = 0;
+            double ay = 0;
+            panel.buttonCenter({K::SelectSlot, 0, 0}, ax, ay);
+            expect(std::string("パネル: タップのカードが 3 段目にある（") + languageCode(lang) + "）",
+                   cards && y > ay && y == y2 && x < x2 && y < SettingsPanel::kHeight);
+            panel.pointerDown(x2, y2, lang == Language::Ja ? 0.0 : 1.0);
+            panel.render(config, view);
+            double cx = 0;
+            double cy = 0;
+            expect(std::string("パネル: タップのカードを選ぶと、その割り当ての選択肢が出る（") + languageCode(lang) + "）",
+                   panel.selectedSlot() == kTap3Slot &&
+                       panel.buttonCenter({K::Assign, static_cast<int>(ActionType::None), kTap3Slot}, cx, cy) &&
+                       cy < SettingsPanel::kHeight - 40);
+        }
+    }
+}
+
+/**
+ * 見本のアプリ（MPRIS のプレーヤー）を作る。
+ * @param name バス名の頭を除いた名前（"chromium.instance2" など）
+ * @param status PlaybackStatus
+ * @param title 曲名
+ * @return アプリ
+ */
+MediaPlayer mediaPlayer(const std::string& name, const std::string& status, const std::string& title = "") {
+    MediaPlayer player;
+    player.busName = std::string(kMprisPrefix) + name;
+    player.status = status;
+    player.canPlay = player.canPause = player.canGoNext = player.canGoPrevious = true;
+    player.title = title;
+    return player;
+}
+
+/** 音楽の操作: アプリの選び方・呼ぶメソッド・覚え方・設定の読み書き・文言・お知らせ・設定パネルの「音楽」の側。 */
+void testMedia() {
+    expect("音楽: MPRIS の名前だけを候補にする（playerctld と頭だけの名前は除く）",
+           isMediaPlayerName("org.mpris.MediaPlayer2.chromium.instance2") && isMediaPlayerName("org.mpris.MediaPlayer2.vlc") &&
+               !isMediaPlayerName(kPlayerctldName) && !isMediaPlayerName("org.mpris.MediaPlayer2.") &&
+               !isMediaPlayerName("org.freedesktop.Notifications") && !isMediaPlayerName(":1.97703"));
+    expect("音楽: 種類の見分け", isMediaAction(ActionType::MediaPlayPause) && isMediaAction(ActionType::MediaNext) &&
+                                   isMediaAction(ActionType::MediaPrevious) && !isMediaAction(ActionType::MicMuteToggle) &&
+                                   !isMediaAction(ActionType::Command) && !isMediaAction(ActionType::None));
+    {
+        const MediaMemory none;
+        expect("音楽: アプリが無ければ選ばない", chooseMediaPlayer({}, none) == -1);
+        expect("音楽: 止まっている（Stopped）・状態の分からないアプリは選ばない",
+               chooseMediaPlayer({mediaPlayer("a", "Stopped"), mediaPlayer("b", "")}, none) == -1);
+        expect("音楽: 再生中のアプリを選ぶ（一時停止中より先）",
+               chooseMediaPlayer({mediaPlayer("a", "Paused"), mediaPlayer("b", "Playing"), mediaPlayer("c", "Stopped")}, none) ==
+                   1);
+        MediaPlayer locked = mediaPlayer("a", "Playing");
+        locked.canControl = false;
+        expect("音楽: CanControl が false のアプリは選ばない",
+               chooseMediaPlayer({locked, mediaPlayer("b", "Paused")}, none) == 1);
+        const std::vector<MediaPlayer> two = {mediaPlayer("a", "Playing"), mediaPlayer("b", "Playing")};
+        MediaMemory memory;
+        expect("音楽: 再生中が 2 つで覚えが無ければ並びの最初", chooseMediaPlayer(two, memory) == 0);
+        memory.lastControlled = two[1].busName;
+        expect("音楽: 再生中が 2 つなら、前に操作したほう", chooseMediaPlayer(two, memory) == 1);
+        const std::vector<MediaPlayer> paused = {mediaPlayer("a", "Paused"), mediaPlayer("b", "Paused"),
+                                                 mediaPlayer("c", "Paused")};
+        MediaMemory pausedMemory;
+        pausedMemory.lastPaused = paused[2].busName;
+        pausedMemory.lastControlled = paused[1].busName;
+        expect("音楽: 再生中が無ければ、前に一時停止にしたもの（同じタブに戻る）", chooseMediaPlayer(paused, pausedMemory) == 2);
+        pausedMemory.lastPaused = std::string(kMprisPrefix) + "gone";
+        expect("音楽: 一時停止にしたものがもう無ければ、前に操作した一時停止中のもの",
+               chooseMediaPlayer(paused, pausedMemory) == 1);
+        expect("音楽: 覚えが無ければ一時停止中の最初", chooseMediaPlayer(paused, none) == 0);
+        MediaMemory both;
+        both.lastPaused = paused[0].busName;
+        expect("音楽: 前に一時停止にしたものがあっても、ほかで再生中ならそちら",
+               chooseMediaPlayer({paused[0], mediaPlayer("x", "Playing")}, both) == 1);
+    }
+    {
+        MediaPlayer playing = mediaPlayer("a", "Playing");
+        MediaPlayer paused = mediaPlayer("a", "Paused");
+        const MediaCall pause = mediaCallFor(ActionType::MediaPlayPause, playing);
+        const MediaCall play = mediaCallFor(ActionType::MediaPlayPause, paused);
+        expect("音楽: 再生中なら Pause、一時停止中なら Play（結果の値つき）",
+               pause.method == "Pause" && pause.value == kMediaPaused && play.method == "Play" && play.value == kMediaPlaying);
+        expect("音楽: 次の曲・前の曲", mediaCallFor(ActionType::MediaNext, playing).method == "Next" &&
+                                           mediaCallFor(ActionType::MediaNext, playing).value == kMediaNext &&
+                                           mediaCallFor(ActionType::MediaPrevious, paused).method == "Previous" &&
+                                           mediaCallFor(ActionType::MediaPrevious, paused).value == kMediaPrevious);
+        playing.canPause = false;
+        paused.canPlay = false;
+        playing.canGoNext = false;
+        paused.canGoPrevious = false;
+        expect("音楽: Can… が false なら呼ばない（対応していない）",
+               mediaCallFor(ActionType::MediaPlayPause, playing).method.empty() &&
+                   mediaCallFor(ActionType::MediaPlayPause, paused).method.empty() &&
+                   mediaCallFor(ActionType::MediaNext, playing).method.empty() &&
+                   mediaCallFor(ActionType::MediaPrevious, paused).method.empty() &&
+                   mediaCallFor(ActionType::MediaNext, paused).method == "Next");
+        MediaMemory memory;
+        rememberMediaPlayer(memory, "A", kMediaPaused);
+        const bool pausedOk = memory.lastControlled == "A" && memory.lastPaused == "A";
+        rememberMediaPlayer(memory, "B", kMediaNext);
+        const bool nextOk = memory.lastControlled == "B" && memory.lastPaused == "A";
+        rememberMediaPlayer(memory, "A", kMediaPlaying);
+        expect("音楽: 操作したアプリを覚える（一時停止にしたものは、再生に戻すまで）",
+               pausedOk && nextOk && memory.lastControlled == "A" && memory.lastPaused.empty());
+    }
+    {
+        // 設定ファイル: 3 つの種類を読み書きできる（version は 3 のまま）
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(R"({ "version": 3, "actions": { "press_1": "media_play_pause",
+                                             "press_4": { "type": "media_next" }, "tap_2": { "type": "media_previous" } } })",
+                                        config, warnings, error);
+        expect("設定: media_play_pause / media_next / media_previous を読める・知らせなし",
+               ok && warnings.empty() && config.press[0].type == ActionType::MediaPlayPause &&
+                   config.press[3].type == ActionType::MediaNext && config.tap[0].type == ActionType::MediaPrevious);
+        const std::string json = configToJson(config);
+        Config again;
+        expect("設定: 音楽の操作を書いて読み直すと同じ",
+               parseConfigText(json, again, warnings, error) && configToJson(again) == json &&
+                   json.find("\"press_1\": { \"type\": \"media_play_pause\" }") != std::string::npos &&
+                   json.find("\"tap_2\": { \"type\": \"media_previous\" }") != std::string::npos);
+        expect("設定: 音楽の操作に SteamVR は要らない（--test-action でつながない）",
+               !actionSpec(ActionType::MediaPlayPause).needsVr && !actionSpec(ActionType::MediaNext).needsVr &&
+                   !actionSpec(ActionType::MediaPrevious).needsVr);
+    }
+    expect("文言: 音楽の操作の名前（日英）",
+           std::string(actionLabel(Language::Ja, ActionType::MediaPlayPause)) == "再生・一時停止" &&
+               std::string(actionLabel(Language::Ja, ActionType::MediaNext)) == "次の曲" &&
+               std::string(actionLabel(Language::Ja, ActionType::MediaPrevious)) == "前の曲" &&
+               std::string(actionLabel(Language::En, ActionType::MediaPlayPause)) == "Play / pause" &&
+               std::string(actionLabel(Language::En, ActionType::MediaNext)) == "Next track" &&
+               std::string(actionLabel(Language::En, ActionType::MediaPrevious)) == "Previous track");
+    expect("文言: 音楽の操作のアイコン", iconForAction(ActionType::MediaPlayPause) == Icon::PlayPause &&
+                                             iconForAction(ActionType::MediaNext) == Icon::SkipNext &&
+                                             iconForAction(ActionType::MediaPrevious) == Icon::SkipPrevious);
+    {
+        PressRecord press;
+        press.kind = PressRecord::Kind::Count;
+        press.count = 1;
+        press.action = ActionType::MediaPlayPause;
+        press.value = kMediaPaused;
+        press.track = "アトラクトライト / *Luna - Covered by しほ";
+        HudToast toast;
+        expect("お知らせ: 一時停止（2 行目は曲名）",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "一時停止" && toast.sub == press.track &&
+                   toast.icon == Icon::Pause && !toast.error);
+        press.value = kMediaPlaying;
+        expect("お知らせ: 再生（英語）", makeHudToast(press, Language::En, toast) && toast.title == "Playing" &&
+                                              toast.icon == Icon::Play && toast.tone == HudToast::Tone::Accent);
+        press.action = ActionType::MediaNext;
+        press.value = kMediaNext;
+        press.track.clear();
+        press.count = 2;
+        expect("お知らせ: 次の曲で曲名がまだ分からなければ、2 行目は押し方",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "次の曲" && toast.sub == "2 回押し" &&
+                   toast.icon == Icon::SkipNext);
+        press.kind = PressRecord::Kind::Tap;
+        press.action = ActionType::MediaPrevious;
+        press.value = kMediaPrevious;
+        press.track = "Song";
+        expect("お知らせ: 前の曲（タップ）", makeHudToast(press, Language::Ja, toast) && toast.title == "前の曲" &&
+                                                  toast.sub == "Song" && toast.icon == Icon::SkipPrevious);
+        press.kind = PressRecord::Kind::Count;
+        press.count = 1;
+        press.action = ActionType::MediaPlayPause;
+        press.ok = false;
+        press.value.clear();
+        press.track.clear();
+        press.reason = kReasonNoPlayer;
+        expect("お知らせ: 再生しているアプリが無いときの失敗",
+               makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "再生・一時停止できません" &&
+                   toast.sub == "1 回押し・再生しているアプリが見つかりません");
+        press.action = ActionType::MediaNext;
+        press.reason = kReasonMediaUnsupported;
+        expect("お知らせ: 対応していないときの失敗（英語）",
+               makeHudToast(press, Language::En, toast) && toast.error && toast.title == "Couldn't skip to the next track" &&
+                   toast.sub == "1 press · Not supported by this app");
+    }
+    {
+        // 設定パネル: 割り当ての列の「音楽」の側
+        using K = PanelAction::Kind;
+        Config config;
+        expect("パネル: 音楽の操作を割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::MediaNext), 3}, config) &&
+                   config.press[3].type == ActionType::MediaNext && config.press[3].commandId.empty());
+        FontSet fonts;
+        fonts.load("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc");
+        SettingsPanel panel(fonts);
+        PanelView view;
+        view.daemon = PanelView::Daemon::Running;
+        for (const Language lang : {Language::Ja, Language::En}) {
+            const std::string tag = std::string("（") + languageCode(lang) + "）";
+            config.language = lang;
+            panel.setTab(PanelTab::Assign);
+            panel.setSelectedSlot(3);
+            panel.render(config, view);
+            double x = 0;
+            double y = 0;
+            double bx = 0;
+            double by = 0;
+            double bw = 0;
+            double bh = 0;
+            // 選んだカードが音楽の操作なら、音楽の側（3 つが 1 段に並び、アクションの側の選択肢は無い）
+            bool row = true;
+            double firstY = -1;
+            double lastRight = 0;
+            for (const ActionType type : {ActionType::MediaPlayPause, ActionType::MediaNext, ActionType::MediaPrevious}) {
+                if (!panel.buttonBounds({K::Assign, static_cast<int>(type), 3}, bx, by, bw, bh)) {
+                    row = false;
+                    continue;
+                }
+                if (firstY < 0) firstY = by;
+                row = row && by == firstY && bx >= lastRight && bx + bw <= SettingsPanel::kWidth - 24 &&
+                      by + bh <= SettingsPanel::kHeight - 40;
+                lastRight = bx + bw;
+            }
+            expect("パネル: 音楽の操作を割り当てたカードを選ぶと、音楽の側の 3 つが 1 段に並ぶ" + tag,
+                   row && !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MicMuteToggle), 3}, x, y));
+            expect("パネル: ［アクション｜音楽｜コマンド］の切り替えがある" + tag,
+                   panel.buttonCenter({K::PickerActions, 0, 0}, x, y) && panel.buttonCenter({K::PickerMedia, 0, 0}, x, y) &&
+                       panel.buttonCenter({K::PickerCommands, 0, 0}, x, y));
+            panel.buttonCenter({K::PickerActions, 0, 0}, x, y);
+            panel.pointerDown(x, y, 0.0);
+            panel.render(config, view);
+            double ox = 0;
+            double oy = 0;
+            expect("パネル: アクションの側は 9 つ（音楽の操作は入らない）" + tag,
+                   panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MicMuteToggle), 3}, x, y) &&
+                       panel.buttonCenter({K::Assign, static_cast<int>(ActionType::None), 3}, ox, oy) && oy > y &&
+                       !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MediaNext), 3}, x, y));
+            panel.buttonCenter({K::PickerMedia, 0, 0}, x, y);
+            panel.pointerDown(x, y, 1.0);
+            panel.render(config, view);
+            const bool media = panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MediaPlayPause), 3}, x, y);
+            const PanelAction pressed = panel.pointerDown(x, y, 2.0);
+            expect("パネル: 音楽の側に切り替えて、再生・一時停止を押すと割り当ての操作が返る" + tag,
+                   media && pressed == PanelAction({K::Assign, static_cast<int>(ActionType::MediaPlayPause), 3}));
+        }
+    }
+}
+
+/** 視点のリセット: リセットしてよいかの判断・間引き・設定・文言・お知らせ・パネルのアクションの側。 */
+void testRecenter() {
+    {
+        RecenterGate gate;
+        RecenterState worn;
+        worn.connected = true;
+        worn.hmdInUse = true;
+        worn.hmdTracking = true;
+        RecenterState off = worn;
+        off.connected = false;
+        RecenterState standby = worn;
+        standby.hmdInUse = false;
+        RecenterState lost = worn;
+        lost.hmdTracking = false;
+        expect("視点のリセット: かぶっていて姿勢が取れていればリセットする", gate.decide(worn, 1000) == RecenterDecision::Reset);
+        expect("視点のリセット: SteamVR につながっていなければしない", gate.decide(off, 1000) == RecenterDecision::NoSteamVr);
+        expect("視点のリセット: かぶっていなければしない（姿勢が取れていても）",
+               gate.decide(standby, 1000) == RecenterDecision::NotWorn);
+        expect("視点のリセット: 姿勢が取れていなければしない", gate.decide(lost, 1000) == RecenterDecision::NotTracking);
+        gate.markReset(1000);
+        expect("視点のリセット: 1 秒以内の 2 回目はし直さない",
+               gate.decide(worn, 1000) == RecenterDecision::Repeated && gate.decide(worn, 1999) == RecenterDecision::Repeated);
+        expect("視点のリセット: 1 秒たてばまたリセットする", gate.decide(worn, 2000) == RecenterDecision::Reset);
+        expect("視点のリセット: 1 秒以内でも、かぶっていなければ失敗（間引きより先）",
+               gate.decide(standby, 1500) == RecenterDecision::NotWorn);
+        RecenterGate fresh;
+        expect("視点のリセット: 一度もリセットしていなければ、時刻が 0 でも間引かない",
+               fresh.decide(worn, 0) == RecenterDecision::Reset);
+        expect("視点のリセット: 失敗の理由のコード",
+               std::string(recenterFailureReason(RecenterDecision::NoSteamVr)) == "no_steamvr" &&
+                   std::string(recenterFailureReason(RecenterDecision::NotWorn)) == kReasonNotWorn &&
+                   std::string(recenterFailureReason(RecenterDecision::NotTracking)) == kReasonNotTracking &&
+                   std::string(recenterFailureReason(RecenterDecision::Reset)).empty() &&
+                   std::string(recenterFailureReason(RecenterDecision::Repeated)).empty());
+    }
+    {
+        // 設定ファイル: recenter を読み書きできる（version は 3 のまま）
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(R"({ "version": 3, "actions": { "long_press": "recenter",
+                                             "tap_2": { "type": "recenter" } } })",
+                                        config, warnings, error);
+        expect("設定: recenter を読める・知らせなし",
+               ok && warnings.empty() && config.longPress.type == ActionType::Recenter &&
+                   config.tap[0].type == ActionType::Recenter);
+        const std::string json = configToJson(config);
+        Config again;
+        expect("設定: 視点のリセットを書いて読み直すと同じ",
+               parseConfigText(json, again, warnings, error) && configToJson(again) == json &&
+                   json.find("\"long_press\": { \"type\": \"recenter\" }") != std::string::npos &&
+                   json.find("\"tap_2\": { \"type\": \"recenter\" }") != std::string::npos);
+        expect("設定: 視点のリセットには SteamVR が要る（--test-action でつなぐ）", actionSpec(ActionType::Recenter).needsVr);
+    }
+    expect("文言: 視点のリセットの名前・カードの 2 行目（日英）",
+           std::string(actionLabel(Language::Ja, ActionType::Recenter)) == "視点のリセット" &&
+               std::string(actionLabel(Language::En, ActionType::Recenter)) == "Recenter view" &&
+               std::string(uiText(Language::Ja).stRecenter) == "今向いている方を正面にします");
+    expect("文言: 視点のリセットのアイコン", iconForAction(ActionType::Recenter) == Icon::Recenter);
+    {
+        PressRecord press;
+        press.kind = PressRecord::Kind::Long;
+        press.action = ActionType::Recenter;
+        press.ok = true;
+        press.value = kRecentered;
+        HudToast toast;
+        expect("お知らせ: 視点のリセット（2 行目は押し方）",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "視点をリセットしました" && toast.sub == "長押し" &&
+                   toast.icon == Icon::Recenter && !toast.error);
+        press.kind = PressRecord::Kind::Tap;
+        press.count = 2;
+        press.value = kRecenterRepeated;
+        expect("お知らせ: 1 秒以内の 2 回目も同じお知らせ（英語・タップ）",
+               makeHudToast(press, Language::En, toast) && toast.title == "View recentered" && !toast.error);
+        press.kind = PressRecord::Kind::Long;
+        press.ok = false;
+        press.value.clear();
+        press.reason = kReasonNotWorn;
+        expect("お知らせ: かぶっていないときの失敗",
+               makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "視点をリセットできません" &&
+                   toast.sub == "長押し・ヘッドセットをかぶっている間だけ使えます");
+        press.reason = kReasonNotTracking;
+        expect("お知らせ: 姿勢が取れていないときの失敗（英語）",
+               makeHudToast(press, Language::En, toast) && toast.error && toast.title == "Couldn't recenter the view" &&
+                   toast.sub == "Long press · The headset isn't being tracked");
+        press.reason = "no_steamvr";
+        expect("お知らせ: SteamVR につながっていないときの失敗",
+               makeHudToast(press, Language::Ja, toast) && toast.sub == "長押し・SteamVR につながっていません");
+    }
+    {
+        // 設定パネル: アクションの側は 5 列 × 2 段（9 つ。「なし」は最後）
+        using K = PanelAction::Kind;
+        Config config;
+        expect("パネル: 視点のリセットを割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::Recenter), 5}, config) &&
+                   config.longPress.type == ActionType::Recenter && config.longPress.commandId.empty());
+        FontSet fonts;
+        fonts.load("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc");
+        SettingsPanel panel(fonts);
+        PanelView view;
+        view.daemon = PanelView::Daemon::Running;
+        const ActionType order[] = {ActionType::MicMuteToggle, ActionType::BrightnessCycle, ActionType::RoomViewToggle,
+                                    ActionType::Screenshot,    ActionType::PerfOverlayToggle, ActionType::DashboardOpen,
+                                    ActionType::Recenter,      ActionType::OriginalAux,     ActionType::None};
+        for (const Language lang : {Language::Ja, Language::En}) {
+            const std::string tag = std::string("（") + languageCode(lang) + "）";
+            config.language = lang;
+            panel.setTab(PanelTab::Assign);
+            panel.setSelectedSlot(5);
+            panel.render(config, view);
+            bool grid = true;
+            double rowY[2] = {-1, -1};
+            double lastRight[2] = {0, 0};
+            int index = 0;
+            for (const ActionType type : order) {
+                double bx = 0;
+                double by = 0;
+                double bw = 0;
+                double bh = 0;
+                const int row = index < 5 ? 0 : 1;
+                ++index;
+                if (!panel.buttonBounds({K::Assign, static_cast<int>(type), 5}, bx, by, bw, bh)) {
+                    grid = false;
+                    continue;
+                }
+                if (rowY[row] < 0) rowY[row] = by;
+                grid = grid && by == rowY[row] && bx >= lastRight[row] && bx >= 24 &&
+                       bx + bw <= SettingsPanel::kWidth - 24 && by + bh <= SettingsPanel::kHeight - 40;
+                lastRight[row] = bx + bw;
+            }
+            expect("パネル: アクションの側は 5 つと 4 つの 2 段で、視点のリセットは 2 段目・「なし」は最後" + tag,
+                   grid && rowY[1] > rowY[0]);
+            double x = 0;
+            double y = 0;
+            panel.buttonCenter({K::Assign, static_cast<int>(ActionType::Recenter), 5}, x, y);
+            const PanelAction pressed = panel.pointerDown(x, y, 0.0);
+            expect("パネル: 視点のリセットを押すと割り当ての操作が返る" + tag,
+                   pressed == PanelAction({K::Assign, static_cast<int>(ActionType::Recenter), 5}));
+            panel.pointerUp();
+        }
+    }
+}
+
 int main() {
     testPressDetector();
     testBrightness();
@@ -1618,6 +2200,9 @@ int main() {
     testOsc();
     testPanelState();
     testHeadPointer();
+    testTaps();
+    testMedia();
+    testRecenter();
     std::printf("\n%d 件中 %d 件が合格\n", gTotal, gTotal - gFailures);
     return gFailures == 0 ? 0 : 1;
 }

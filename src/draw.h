@@ -148,6 +148,17 @@ struct Pen {
 double fitSize(const Pen& pen, const std::string& text, double size, double minSize, double maxWidth, bool bold);
 
 /**
+ * 幅に入らなければ、後ろを「…」にして縮める（設定パネルと視界のお知らせで使う）。
+ * @param pen 描画の道具
+ * @param text 文字列（UTF-8）
+ * @param size 大きさ
+ * @param bold 太字か
+ * @param maxW 幅
+ * @return 入る文字列
+ */
+std::string ellipsize(const Pen& pen, const std::string& text, double size, bool bold, double maxW);
+
+/**
  * 文字を、ある高さの帯の縦の真ん中に置いたときのベースライン。
  * @param top 帯の上
  * @param h 帯の高さ
