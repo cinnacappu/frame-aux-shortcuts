@@ -8,6 +8,7 @@
   "screenshot_dir": "~/Pictures/frame-aux-shortcuts",
   "screenshot_to_steam": true,
   "run_in_background": true,
+  "original_aux_on_head_pointer": false,
   "language": "ja",
   "update_check": true,
   "commands": [

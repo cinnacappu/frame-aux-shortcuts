@@ -34,6 +34,14 @@ struct HudToast {
 bool makeHudToast(const PressRecord& press, Language language, HudToast& toast);
 
 /**
+ * カーソルのときに aux を SteamVR に返した・ショートカットに戻したときのお知らせ（設定 original_aux_on_head_pointer）。
+ * @param handedBack 返したなら true、ショートカットに戻したなら false
+ * @param language 言語
+ * @return お知らせ
+ */
+HudToast makeHandBackToast(bool handedBack, Language language);
+
+/**
  * 失敗の理由のコードを文言にする。
  * @param language 言語
  * @param reason "no_steamvr" / "room_view_api" / "app_missing" / "app_stopped" / それ以外

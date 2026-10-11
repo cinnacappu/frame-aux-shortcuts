@@ -17,5 +17,6 @@ enum class ActionType {
     Screenshot,         ///< スクリーンショット（IVRScreenshots::RequestScreenshot で VR の画面を PNG に）
     PerfOverlayToggle,  ///< frame-perf-overlay の表示切り替え（SIGUSR1）
     DashboardOpen,      ///< ダッシュボードを開く（IVROverlay::ShowDashboard）
+    OriginalAux,        ///< aux の元の動き（KEY_SELECT の押して離すを gpio-keys に書いて SteamVR に届ける。keymap.h）
     Command,            ///< argv をそのまま実行（シェルは通さない）
 };

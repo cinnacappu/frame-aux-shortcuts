@@ -91,6 +91,8 @@ struct Config {
     std::string screenshotDir = kDefaultScreenshotDir;  ///< スクリーンショットの保存先（~ で始めてよい）
     bool screenshotToSteam = true;  ///< 撮れたスクリーンショットを Steam のライブラリにも入れる（SubmitScreenshot）
     bool runInBackground = true;  ///< 設定パネルを閉じても aux を置き換えたままにする（false なら元の動きに戻す）
+    /** SteamVR がヘッドセットのカーソルで操作している間（コントローラーが無い間）は、置き換えをやめて aux を SteamVR に返す */
+    bool originalAuxOnHeadPointer = false;
     Language language = Language::Ja;  ///< 画面の言語（ファイルに無ければシステムの言語）
     bool updateCheck = true;      ///< 設定パネルが新しい版を確かめる
     std::vector<CommandDef> commands;  ///< 登録したコマンド（フォルダのものは入れない）。並びは commandOrder に合わせる

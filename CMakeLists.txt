@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(frame-aux-shortcuts VERSION 0.2.0 LANGUAGES CXX)
+project(frame-aux-shortcuts VERSION 0.2.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,7 +16,7 @@ pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo)
 pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 pkg_check_modules(VULKAN REQUIRED IMPORTED_TARGET vulkan)
 
-# OpenVR も描画も使わない部分（判定・設定・状態ファイル・文言・コマンドの実行・OSC の送信など）
+# OpenVR も描画も使わない部分（判定・カーソルの判定・設定・状態ファイル・文言・コマンドの実行・OSC の送信など）
 add_library(frame-aux-core STATIC
   src/press_detector.cpp
   src/brightness.cpp
@@ -33,6 +33,7 @@ add_library(frame-aux-core STATIC
   src/keyboard_text.cpp
   src/osc.cpp
   src/panel_state.cpp
+  src/head_pointer.cpp
 )
 target_include_directories(frame-aux-core PUBLIC src)
 target_compile_options(frame-aux-core PRIVATE -Wall -Wextra)

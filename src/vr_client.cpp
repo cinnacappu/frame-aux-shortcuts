@@ -165,6 +165,25 @@ bool VrClient::screenshotResult(uint32_t handle, bool& ok) {
     return true;
 }
 
+// head_pointer.h は OpenVR を使わないので、「機器が無い」の番号を OpenVR と照らし合わせておく
+static_assert(kNoTrackedDevice == vr::k_unTrackedDeviceIndexInvalid, "機器が無いときの番号が OpenVR と違います");
+
+bool VrClient::readPointer(PointerSample& sample) {
+    if (!connected_) return false;
+    PointerSample read;
+    // 0 番はヘッドセット。電源を切ったコントローラーは、一覧に残っていても IsTrackedDeviceConnected が false になる
+    for (vr::TrackedDeviceIndex_t i = vr::k_unTrackedDeviceIndex_Hmd + 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {
+        if (vr::VRSystem()->GetTrackedDeviceClass(i) == vr::TrackedDeviceClass_Controller &&
+            vr::VRSystem()->IsTrackedDeviceConnected(i)) {
+            ++read.controllers;
+        }
+    }
+    read.dashboardVisible = vr::VROverlay()->IsDashboardVisible();
+    read.dashboardPointer = vr::VROverlay()->GetPrimaryDashboardDevice();
+    sample = read;
+    return true;
+}
+
 void VrClient::shutdown() {
     if (!connected_) return;
     vr::VR_Shutdown();

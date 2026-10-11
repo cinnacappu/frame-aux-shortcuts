@@ -163,7 +163,7 @@ void printUsage() {
         "      --preview-update S     更新の帯（uptodate / checking / available / manual / confirm / installing /\n"
         "                             installed / checkfailed / installfailed / unknown）\n"
         "      --preview-perf S       frame-perf-overlay（running / stopped / missing）\n"
-        "      --preview-daemon S     本体（running / standby / stopped）\n"
+        "      --preview-daemon S     本体（running / standby / handedback / stopped）\n"
         "      --preview-autostart S  自動起動（enabled / disabled / notinstalled / busy / failed）\n"
         "      --preview-unmuted      マイクがミュートでないとして描く（既定はミュート中）\n"
         "      --preview-bg-off       「パネルを閉じても aux を使う」をオフとして描く\n"
@@ -403,10 +403,12 @@ int runDumpPng(const Options& options) {
     view.now = std::time(nullptr);
     view.daemon = options.previewDaemon == "stopped"   ? PanelView::Daemon::Stopped
                   : options.previewDaemon == "standby" ? PanelView::Daemon::Standby
+                  : options.previewDaemon == "handedback" ? PanelView::Daemon::HandedBack
                                                        : PanelView::Daemon::Running;
     view.haveStatus = view.daemon != PanelView::Daemon::Stopped;
     Status& s = view.status;
     s.active = view.daemon == PanelView::Daemon::Running;
+    s.handedBack = view.daemon == PanelView::Daemon::HandedBack;
     s.micMuted = options.previewMuted ? 1 : 0;
     s.brightnessPercent = 60;
     s.roomView = 0;
@@ -659,6 +661,7 @@ bool readDaemonState(PanelView& view, std::string& lastText) {
                       status.pid == static_cast<int>(pid);
     const PanelView::Daemon daemon = pid <= 0                      ? PanelView::Daemon::Stopped
                                      : read && status.active       ? PanelView::Daemon::Running
+                                     : read && status.handedBack   ? PanelView::Daemon::HandedBack
                                      : read                        ? PanelView::Daemon::Standby
                                                                    : PanelView::Daemon::Running;
     const std::string key = std::to_string(static_cast<int>(daemon)) + (read ? text : std::string());

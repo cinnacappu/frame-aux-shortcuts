@@ -58,6 +58,7 @@ Icon iconForAction(ActionType type, bool muted) {
         case ActionType::Screenshot: return Icon::Camera;
         case ActionType::PerfOverlayToggle: return Icon::Chart;
         case ActionType::DashboardOpen: return Icon::Grid;
+        case ActionType::OriginalAux: return Icon::Pointer;
         case ActionType::Command: return Icon::Terminal;
         case ActionType::None: return Icon::NoEntry;
     }
@@ -179,6 +180,15 @@ void drawIcon(cairo_t* cr, Icon icon, double cx, double cy, double size, Color c
             cairo_close_path(cr);
             line(cr, 17, 9, 21, 15);
             line(cr, 21, 9, 17, 15);
+            break;
+        case Icon::Pointer:
+            // M4 4 l7 16 2.5-6.5 6.5-2.5z（矢印）・M13.5 13.5 l6 6（柄）
+            cairo_move_to(cr, 4, 4);
+            cairo_line_to(cr, 11, 20);
+            cairo_line_to(cr, 13.5, 13.5);
+            cairo_line_to(cr, 20, 11);
+            cairo_close_path(cr);
+            line(cr, 13.5, 13.5, 19.5, 19.5);
             break;
     }
     cairo_stroke(cr);

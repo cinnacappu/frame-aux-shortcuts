@@ -43,6 +43,7 @@ struct Status {
     std::string version;        ///< 本体の版
     int pid = 0;                ///< 本体の PID
     bool active = false;        ///< aux を置き換えている（ショートカットが効く）
+    bool handedBack = false;    ///< コントローラーが無いので aux を SteamVR に返している（original_aux_on_head_pointer）
     bool vrConnected = false;   ///< SteamVR につながっている
     PressRecord lastPress;
     int micMuted = -1;          ///< マイクのミュート（1 / 0 / -1）

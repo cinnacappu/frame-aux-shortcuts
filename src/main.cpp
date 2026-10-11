@@ -4,6 +4,8 @@
 // evdev を grab せずに読んで押し方を判定する。終わるとき（正常終了・SIGTERM・SIGINT・SIGHUP・SIGUSR2・SteamVR の終了・
 // 致命的なシグナル）には必ず 656 → 353 に戻す。SIGKILL では戻らないので、そのときは --restore か再起動で戻す。
 // 設定の run_in_background が false なら、設定パネル（frame-aux-shortcuts-panel）が動いている間だけ置き換える。
+// 設定の original_aux_on_head_pointer が true なら、SteamVR がヘッドセットのカーソルで操作している間（コントローラーが無い間）は
+// 置き換えをやめて aux を SteamVR に返す（カーソルのクリックに使えるように）。
 // 状態（最後の押し方・ミュート・明るさなど）は $XDG_RUNTIME_DIR/frame-aux-shortcuts/status.json に書き、設定パネルが読む。
 // sudo は使わない（steamos は input グループなので /dev/input/event* を読み書きできる）。
 #include "action_worker.h"
@@ -12,6 +14,7 @@
 #include "command.h"
 #include "config.h"
 #include "draw.h"
+#include "head_pointer.h"
 #include "hud_message.h"
 #include "hud_overlay.h"
 #include "hud_render.h"
@@ -71,6 +74,7 @@ constexpr int64_t kConfigCheckMs = 1000;  ///< 設定ファイルの変更を確
 constexpr int64_t kPanelCheckMs = 500;    ///< 設定パネルが動いているかを確かめる間隔（run_in_background が false のとき）
 constexpr int64_t kSampleMs = 1000;       ///< 明るさ・パススルーを読む間隔
 constexpr int64_t kAppsCheckMs = 2000;    ///< frame-perf-overlay の状態を読む間隔
+constexpr int64_t kPointerPollMs = 500;   ///< カーソルの判定に使う値（コントローラーの数など）を読む間隔
 constexpr int kMicFastMs = 1000;          ///< ミュートを読む間隔（ミュート中の表示か設定パネルが要るとき）
 constexpr int kMicSlowMs = 5000;          ///< ミュートを読む間隔（それ以外）
 
@@ -123,7 +127,7 @@ void printUsage() {
         "  --show-keymap        キー対応表を読んで表示するだけで終わる（書き換えない）\n"
         "  --test-action TYPE   アクションを 1 回だけ実行して終わる（キー対応表は触らない）\n"
         "                       TYPE: mic_mute_toggle / brightness_cycle / room_view_toggle / screenshot /\n"
-        "                             perf_overlay_toggle / dashboard_open / command / none\n"
+        "                             perf_overlay_toggle / dashboard_open / original_aux / command / none\n"
         "                       （command は設定の割り当てのうち最初のもののコマンドを使う）\n"
         "  --send-osc TARGET ADDRESS  OSC の ADDRESS に 1 を送り、0.15 秒後に 0 を送って終わる（ボタンを押して離す）。\n"
         "                       TARGET: auto:9000（Steam Link でつないでいる PC）か <IPv4>:<ポート>。\n"
@@ -409,6 +413,7 @@ int runDumpHud(const Options& options) {
         {"perf-shown", 5, ActionType::PerfOverlayToggle, true, "shown", ""},
         {"perf-missing", 5, ActionType::PerfOverlayToggle, false, "", "app_missing"},
         {"dashboard-failed", 0, ActionType::DashboardOpen, false, "", "no_steamvr"},
+        {"original-aux-failed", 1, ActionType::OriginalAux, false, "", "failed"},
         {"vrchat-mute", 2, ActionType::Command, true, "osc:/input/Voice", ""},
         {"vrchat-mute-nopc", 2, ActionType::Command, false, "osc:/input/Voice", "no_pc"},
     };
@@ -427,6 +432,15 @@ int runDumpHud(const Options& options) {
             if (!makeHudToast(press, lang, toast)) continue;
             renderer.renderToast(toast);
             const std::string path = options.dumpDir + "/hud-" + suffix + "-" + sample.name + ".png";
+            if (!renderer.writeToastPng(path)) {
+                std::fprintf(stderr, "PNG を書き出せませんでした: %s\n", path.c_str());
+                return 1;
+            }
+            ++written;
+        }
+        for (const bool handedBack : {true, false}) {
+            renderer.renderToast(makeHandBackToast(handedBack, lang));
+            const std::string path = options.dumpDir + "/hud-" + suffix + (handedBack ? "-hand-back" : "-shortcuts-back") + ".png";
             if (!renderer.writeToastPng(path)) {
                 std::fprintf(stderr, "PNG を書き出せませんでした: %s\n", path.c_str());
                 return 1;
@@ -503,6 +517,50 @@ public:
         if (!active) detector_.reset();
         updateBadge();
         writeStatus();
+    }
+
+    /**
+     * aux の扱いが変わったときに呼ぶ（置き換えているか・カーソルの間なので SteamVR に返しているか）。
+     * @param active 置き換えていれば true
+     * @param handedBack カーソルの間なので返していれば true（返している間も、ミュート中の表示は出したままにする）
+     * @param notify 視界にお知らせを出す（返した・ショートカットに戻したとき）
+     */
+    void setAuxState(bool active, bool handedBack, bool notify) {
+        handedBack_ = handedBack;
+        status_.handedBack = handedBack;
+        setActive(active);
+        if (notify && config_.hudEnabled && vr_.connected()) {
+            overlay_.showToast(hud_.renderToast(makeHandBackToast(handedBack, config_.language)),
+                               static_cast<double>(nowMs()) / 1000.0);
+        }
+    }
+
+    /**
+     * カーソルの判定を最初から（カーソルでない状態）にする。SteamVR につないだときに呼ぶ。
+     * @param now 今の時刻（ms、単調増加）
+     */
+    void resetPointer(int64_t now) {
+        pointer_.reset(now);
+        lastRawPointer_ = false;
+    }
+
+    /**
+     * カーソルの判定に使う値を SteamVR から読み、落ち着いた状態を返す。
+     * @param now 今の時刻（ms、単調増加）
+     * @return カーソルで操作している（落ち着いた状態）なら true。つながっていなければ false
+     */
+    bool samplePointer(int64_t now) {
+        PointerSample sample;
+        if (!vr_.readPointer(sample)) return false;
+        const bool raw = isHeadPointer(sample);
+        if (raw != lastRawPointer_) {
+            std::fprintf(stderr, "[カーソル] %s（コントローラー %d 本・ダッシュボード%s・ポインターの機器 %d）\n",
+                         raw ? "ヘッドセットのカーソルになりました" : "コントローラーで操作する状態になりました",
+                         sample.controllers, sample.dashboardVisible ? "を表示中" : "は閉じている",
+                         sample.dashboardPointer == kNoTrackedDevice ? -1 : static_cast<int>(sample.dashboardPointer));
+            lastRawPointer_ = raw;
+        }
+        return pointer_.update(raw, now);
     }
 
     /**
@@ -617,7 +675,7 @@ public:
                 writeStatus();
             }
         }
-        const bool needFast = (config_.muteBadge && status_.active) || panelRunning_;
+        const bool needFast = (config_.muteBadge && (status_.active || handedBack_)) || panelRunning_;
         mic_.setIntervalMs(needFast ? kMicFastMs : kMicSlowMs);
     }
 
@@ -734,7 +792,7 @@ private:
     /** ミュート中の表示を、今の状態に合わせて出す・消す。 */
     void updateBadge() {
         // スクリーンショットを撮っている間（頼む前から結果が来るまで）は出さない
-        const bool want = config_.muteBadge && status_.active && status_.micMuted == 1 && vr_.connected() &&
+        const bool want = config_.muteBadge && (status_.active || handedBack_) && status_.micMuted == 1 && vr_.connected() &&
                           pendingShots_.empty() && !takingScreenshot_;
         const int language = static_cast<int>(config_.language);
         if (want == badgeShown_ && (!want || language == badgeLanguage_)) return;
@@ -765,9 +823,12 @@ private:
     };
     std::vector<PendingShot> pendingShots_;
     MicMonitor mic_;
+    HeadPointerTracker pointer_;  ///< カーソルの判定（落ち着かせたもの）
     Status status_;
     unsigned micGeneration_ = 0;
     bool panelRunning_ = false;
+    bool handedBack_ = false;      ///< カーソルの間なので aux を SteamVR に返している
+    bool lastRawPointer_ = false;  ///< 前に読んだカーソルの判定（ログ用）
     bool takingScreenshot_ = false;  ///< スクリーンショットを頼んでいる最中（ミュート中の表示を出さない）
     bool badgeShown_ = false;
     int badgeLanguage_ = -1;
@@ -870,24 +931,40 @@ int runDaemon(const Options& options) {
     }
 
     Daemon daemon(initialConfig, wakePipe[1]);
-    // 置き換えるのは、run_in_background か、設定パネルが動いているとき
-    bool active = false;
+    // 置き換えるのは、run_in_background か、設定パネルが動いているとき。
+    // ただし original_aux_on_head_pointer なら、カーソルで操作している間は置き換えない（SteamVR に返す）
+    bool active = false;       // aux を置き換えている
+    bool handedBack = false;   // カーソルの間なので SteamVR に返している
+    bool headPointer = false;  // カーソルで操作している（落ち着いた状態）
     bool panelRunning = runningPid(kPanelName) > 0;
     daemon.setPanelRunning(panelRunning);
     /**
-     * 置き換える・戻すを、設定とパネルの有無に合わせる。
+     * 置き換える・戻すを、設定・パネルの有無・カーソルの状態に合わせる。
      * @return 失敗したら false
      */
     const auto applyActive = [&]() {
-        const bool want = daemon.config().runInBackground || panelRunning;
-        if (want == active) return true;
-        std::string result;
-        const bool ok = want ? keymap_guard::activate(result) : keymap_guard::deactivate(result);
-        std::fprintf(stderr, "[対応表] %s: %s\n",
-                     want ? "aux を置き換えます" : "aux を元の動きに戻します（パネルを閉じたら戻す設定）", result.c_str());
-        if (!ok) return false;
+        const AuxMode mode = decideAuxMode(daemon.config().runInBackground || panelRunning,
+                                           daemon.config().originalAuxOnHeadPointer, headPointer);
+        const bool want = mode == AuxMode::Shortcuts;
+        const bool wantHandedBack = mode == AuxMode::HandedBack;
+        if (want == active && wantHandedBack == handedBack) return true;
+        if (want != active) {
+            std::string result;
+            const bool ok = want ? keymap_guard::activate(result) : keymap_guard::deactivate(result);
+            std::fprintf(stderr, "[対応表] %s: %s\n",
+                         want             ? "aux を置き換えます"
+                         : wantHandedBack ? "aux を元の動きに戻します（ヘッドセットのカーソルで操作している間）"
+                                          : "aux を元の動きに戻します（パネルを閉じたら戻す設定）",
+                         result.c_str());
+            if (!ok) return false;
+        }
+        // お知らせは、カーソルのために返したときと、返していたのをショートカットに戻したときだけ。
+        // 対応表を実際に変えたときに限る（返している間にパネルを閉じて元の動きのままになったとき・
+        // その状態でパネルを開き直して返している状態に戻ったときは、aux の動きが変わらないので出さない）
+        const bool notify = want != active && wantHandedBack != handedBack && (wantHandedBack || want);
         active = want;
-        daemon.setActive(active);
+        handedBack = wantHandedBack;
+        daemon.setAuxState(active, handedBack, notify);
         return true;
     };
     if (!daemon.config().runInBackground && !panelRunning) {
@@ -912,6 +989,7 @@ int runDaemon(const Options& options) {
     int64_t nextPanelCheck = nowMs() + kPanelCheckMs;
     int64_t nextSample = 0;
     int64_t nextApps = 0;
+    int64_t nextPointer = 0;
     std::fprintf(stderr, "[起動] aux ボタンを待ちます（長押し %d ms・回数の区切り %d ms）\n", daemon.config().longPressMs,
                  daemon.config().multiPressGapMs);
 
@@ -925,6 +1003,8 @@ int runDaemon(const Options& options) {
                 std::fprintf(stderr, "[VR] SteamVR につながりました\n");
                 lastVrMessage.clear();
                 nextSample = now;
+                daemon.resetPointer(now);
+                nextPointer = now;
             } else if (message != lastVrMessage) {
                 std::fprintf(stderr, "[VR] %s（3 秒おきに再試行。SteamVR を使うアクションは失敗の音になります）\n",
                              result == VrClient::ConnectResult::NotRunning ? "SteamVR が起動していないので待ちます"
@@ -957,6 +1037,29 @@ int runDaemon(const Options& options) {
             }
             nextPanelCheck = now + kPanelCheckMs;
         }
+        if (keymap_guard::takeRemapLost()) {
+            // aux の元の動きのあと置き直せなかった。置き換えていないことにして、置き換えをやり直す
+            std::fprintf(stderr, "[対応表] aux の元の動きのあと置き直せなかったので、置き換えをやり直します\n");
+            active = false;
+            if (!applyActive()) {
+                exitCode = 1;
+                break;
+            }
+        }
+        if (vr.connected() && now >= nextPointer) {
+            // カーソルの判定は、設定がオフでも読んでおく（オンにしたとき、すぐ今の状態で決められるように）
+            const bool pointer = daemon.samplePointer(now);
+            if (pointer != headPointer) {
+                headPointer = pointer;
+                std::fprintf(stderr, "[カーソル] %s\n", headPointer ? "ヘッドセットのカーソルで操作しています（落ち着いた）"
+                                                                     : "コントローラーで操作しています（落ち着いた）");
+                if (!applyActive()) {
+                    exitCode = 1;
+                    break;
+                }
+            }
+            nextPointer = now + kPointerPollMs;
+        }
         if (now >= nextSample) {
             daemon.sampleVr();
             nextSample = now + kSampleMs;
@@ -977,7 +1080,7 @@ int runDaemon(const Options& options) {
         // 次に起きる時刻まで、入力・知らせ・止める知らせを待つ
         now = nowMs();
         int64_t wakeAt = std::min({nextConfigCheck, nextPanelCheck, nextSample, nextApps});
-        if (!options.noVr) wakeAt = std::min(wakeAt, vr.connected() ? nextVrPoll : nextVrTry);
+        if (!options.noVr) wakeAt = std::min(wakeAt, vr.connected() ? std::min(nextVrPoll, nextPointer) : nextVrTry);
         const int64_t deadline = daemon.detector().nextDeadlineMs();
         if (deadline >= 0) wakeAt = std::min(wakeAt, deadline);
         const int64_t hudAt = daemon.nextHudTickMs();

@@ -1,9 +1,11 @@
 // 実機（gpio-keys・SteamVR・PipeWire）無しで動く単体テスト。ctest --test-dir build で動かす。
 // 押し方の判定・明るさの計算・設定の読み書きと version 1 からの移行・状態ファイル・外部の出力の読み取り・
-// WebSocket のフレーム・スクリーンショットの保存先・文言・視界のお知らせ・設定パネルの操作と当たり判定を確かめる。
+// WebSocket のフレーム・スクリーンショットの保存先・文言・視界のお知らせ・設定パネルの操作と当たり判定・
+// カーソルの判定（aux を SteamVR に返すか）を確かめる。
 #include "brightness.h"
 #include "config.h"
 #include "draw.h"
+#include "head_pointer.h"
 #include "hud_message.h"
 #include "i18n.h"
 #include "keyboard_text.h"
@@ -213,6 +215,7 @@ void testConfig() {
                    config.updateCheck);
         expect("設定の既定: スクリーンショットは ~/Pictures/frame-aux-shortcuts",
                config.screenshotDir == "~/Pictures/frame-aux-shortcuts" && config.screenshotToSteam);
+        expect("設定の既定: カーソルのときに aux を元に戻すのはオフ", !config.originalAuxOnHeadPointer);
     }
     auto has = [](const std::vector<std::string>& warnings, const std::string& part) {
         for (const auto& w : warnings) {
@@ -299,7 +302,8 @@ void testConfig() {
                config.press[0].type == ActionType::MicMuteToggle && config.press[1].type == ActionType::BrightnessCycle &&
                    config.press[2].type == ActionType::RoomViewToggle && config.press[4].type == ActionType::None &&
                    config.longPress.type == ActionType::DashboardOpen);
-        expect("設定 v1: 書いていない新しい項目は既定値", config.hudEnabled && config.muteBadge && config.runInBackground);
+        expect("設定 v1: 書いていない新しい項目は既定値",
+               config.hudEnabled && config.muteBadge && config.runInBackground && !config.originalAuxOnHeadPointer);
     }
     {
         Config config;
@@ -326,6 +330,7 @@ void testConfig() {
         config.screenshotDir = "~/Pictures/x";
         config.screenshotToSteam = false;
         config.runInBackground = false;
+        config.originalAuxOnHeadPointer = true;
         config.language = Language::En;
         config.updateCheck = false;
         config.commands = {{"c1", "通知 \"テスト\"", {"notify-send", "a\\b", "空白 のある 引数"}, false},
@@ -334,6 +339,7 @@ void testConfig() {
         config.press[0].type = ActionType::Command;
         config.press[0].commandId = "c1";
         config.press[3].type = ActionType::None;
+        config.press[4].type = ActionType::OriginalAux;
         config.longPress.type = ActionType::Screenshot;
         const std::string json = configToJson(config);
         Config read;
@@ -350,6 +356,10 @@ void testConfig() {
                    !read.updateCheck && read.press[0].type == ActionType::Command && read.press[0].commandId == "c1" &&
                    read.commands == config.commands && read.commandOrder == config.commandOrder &&
                    read.longPress.type == ActionType::Screenshot);
+        expect("設定の書き出し: aux の元の動きとカーソルのときの設定",
+               read.press[4].type == ActionType::OriginalAux && read.originalAuxOnHeadPointer &&
+                   json.find("\"press_5\": { \"type\": \"original_aux\" }") != std::string::npos &&
+                   json.find("\"original_aux_on_head_pointer\": true") != std::string::npos);
         // 割り当ては id だけ（argv はアクションに書かない）
         expect("設定の書き出し: 割り当ては { type, command }",
                json.find("\"press_1\": { \"type\": \"command\", \"command\": \"c1\" }") != std::string::npos);
@@ -371,8 +381,57 @@ void testConfig() {
                 return false;
             }
         }
-        return actionSpecs().size() == 8 && actionSpecs().back().type == ActionType::None;
+        return actionSpecs().size() == 9 && actionSpecs().back().type == ActionType::None;
     }());
+    {
+        // 0.2.1 で足したもの（version は 3 のまま。書いていなければ既定値）
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(R"({ "version": 3, "original_aux_on_head_pointer": true,
+                                             "actions": { "press_1": "original_aux" } })",
+                                        config, warnings, error);
+        expect("設定: original_aux と original_aux_on_head_pointer を読める・知らせなし",
+               ok && warnings.empty() && config.press[0].type == ActionType::OriginalAux && config.originalAuxOnHeadPointer);
+        parseConfigText(R"({ "original_aux_on_head_pointer": "yes" })", config, warnings, error);
+        expect("設定: original_aux_on_head_pointer の型違いは既定値（オフ）で知らせる",
+               !config.originalAuxOnHeadPointer && has(warnings, "original_aux_on_head_pointer"));
+    }
+}
+
+/** カーソルの判定と、aux を SteamVR に返すかの決め方。 */
+void testHeadPointer() {
+    PointerSample sample;
+    sample.controllers = 0;
+    expect("カーソル: コントローラーが 1 本も無ければカーソル", isHeadPointer(sample));
+    sample.controllers = 2;
+    sample.dashboardVisible = true;
+    sample.dashboardPointer = 1;
+    expect("カーソル: コントローラーがポインターならカーソルでない", !isHeadPointer(sample));
+    sample.controllers = 1;
+    sample.dashboardPointer = 1;  // 電源を切ったコントローラーの番号が残っていても、数で決める
+    expect("カーソル: 1 本でもつながっていればカーソルでない", !isHeadPointer(sample));
+    sample.controllers = 0;
+    expect("カーソル: ポインターの番号が残っていても、0 本ならカーソル", isHeadPointer(sample));
+
+    expect("aux の扱い: パネルを閉じたら戻す設定でパネルが無ければ元のまま",
+           decideAuxMode(false, true, true) == AuxMode::Original && decideAuxMode(false, false, false) == AuxMode::Original);
+    expect("aux の扱い: 設定がオフならカーソルでもショートカット", decideAuxMode(true, false, true) == AuxMode::Shortcuts);
+    expect("aux の扱い: 設定がオンでカーソルなら返す", decideAuxMode(true, true, true) == AuxMode::HandedBack);
+    expect("aux の扱い: 設定がオンでもコントローラーならショートカット", decideAuxMode(true, true, false) == AuxMode::Shortcuts);
+
+    HeadPointerTracker tracker;  // 既定: カーソルまで 2 秒・戻るまで 0.5 秒・つないでから 5 秒は待つ
+    tracker.reset(0);
+    expect("カーソルの落ち着き: つないだ直後はカーソルでない", !tracker.update(true, 0));
+    expect("カーソルの落ち着き: つないでから 5 秒はカーソルにしない", !tracker.update(true, 4900));
+    expect("カーソルの落ち着き: 5 秒を過ぎてカーソルが続いていればカーソル", tracker.update(true, 5000));
+    expect("カーソルの落ち着き: コントローラーが戻ってもすぐは戻さない", tracker.update(false, 6000));
+    expect("カーソルの落ち着き: 0.5 秒続いたら戻す", !tracker.update(false, 6500));
+    expect("カーソルの落ち着き: 一瞬のカーソルでは切り替えない", !tracker.update(true, 10000) && !tracker.update(false, 11000) &&
+                                                                     !tracker.update(true, 11500) && !tracker.update(true, 13400));
+    expect("カーソルの落ち着き: 2 秒続いたらカーソル", tracker.update(true, 13500) && tracker.headPointer());
+    tracker.reset(20000);
+    expect("カーソルの落ち着き: reset で最初からにする", !tracker.headPointer() && !tracker.update(true, 20000));
 }
 
 /** 状態ファイル。 */
@@ -404,6 +463,15 @@ void testStatus() {
                            read.lastPress.action == ActionType::BrightnessCycle && read.micMuted == 1 &&
                            read.brightnessPercent == 60 && read.roomView == 0 && read.perfVisible == -1 &&
                            read.perfOverlay == AppState::Stopped);
+    {
+        // コントローラーが無いので返している（handed_back）も読み書きできる。書いていない古いファイルは false
+        Status back;
+        back.handedBack = true;
+        Status backRead;
+        expect("状態: handed_back を読み直せる", parseStatusText(statusToJson(back), backRead, error) && backRead.handedBack &&
+                                                    !backRead.active);
+        expect("状態: handed_back が無ければ false", !read.handedBack);
+    }
     expect("状態: ファイルの形（apps・mic_muted・last_press.kind）",
            json.find("\"apps\": { \"frame-perf-overlay\": \"stopped\" }") != std::string::npos &&
                json.find("\"kind\": \"count\"") != std::string::npos && json.find("\"mic_muted\": true") != std::string::npos);
@@ -543,6 +611,24 @@ void testTextAndHud() {
     press.kind = PressRecord::Kind::Long;
     press.action = ActionType::DashboardOpen;
     expect("お知らせ: ダッシュボードが開いたときは出さない", !makeHudToast(press, Language::Ja, toast));
+    press.kind = PressRecord::Kind::Count;
+    press.count = 1;
+    press.action = ActionType::OriginalAux;
+    expect("お知らせ: aux の元の動きが届いたときは出さない", !makeHudToast(press, Language::Ja, toast));
+    press.ok = false;
+    press.reason = "failed";
+    expect("お知らせ: aux の元の動きの失敗（英語）",
+           makeHudToast(press, Language::En, toast) && toast.error && toast.title == "Couldn't send the aux press");
+    press.ok = true;
+    press.reason.clear();
+    {
+        const HudToast back = makeHandBackToast(true, Language::Ja);
+        const HudToast again = makeHandBackToast(false, Language::Ja);
+        expect("お知らせ: カーソルの間 aux を返した・ショートカットに戻した",
+               back.title == "aux を従来の動きに戻しました" && back.sub == "コントローラーが接続されていない間" && !back.error &&
+                   again.title == "aux のショートカットに戻しました" && again.sub.empty() &&
+                   makeHandBackToast(true, Language::En).title == "aux is back to normal");
+    }
     press.kind = PressRecord::Kind::TooMany;
     press.count = 6;
     press.action = ActionType::MicMuteToggle;
@@ -988,11 +1074,19 @@ void testPanel() {
         expect("パネル: 回数の区切りは 0.05 秒刻み", config.multiPressGapMs == 300);
         for (int i = 0; i < 20; ++i) applyPanelAction({K::GapDec, 0, 0}, config);
         expect("パネル: 回数の区切りは 0.2 秒から", config.multiPressGapMs == 200);
+        expect("パネル: コントローラーが接続されていないときは aux を従来の動きに戻すをオン",
+               applyPanelAction({K::HeadPointerOn, 0, 0}, config) && config.originalAuxOnHeadPointer);
+        expect("パネル: もう一度オンにしても変わらない", !applyPanelAction({K::HeadPointerOn, 0, 0}, config));
+        expect("パネル: aux の元の動きを割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::OriginalAux), 0}, config) &&
+                   config.press[0].type == ActionType::OriginalAux);
         config.language = Language::En;
         config.runInBackground = false;
         expect("パネル: すべて既定に戻す（言語は残す）",
                applyPanelAction({K::ResetAll, 0, 0}, config) && config.longPressMs == 600 && config.runInBackground &&
-                   config.language == Language::En);
+                   !config.originalAuxOnHeadPointer && config.language == Language::En);
+        expect("パネル: コントローラーが接続されていないときは aux を従来の動きに戻すをオフ（既定のまま）",
+               !applyPanelAction({K::HeadPointerOff, 0, 0}, config) && !config.originalAuxOnHeadPointer);
     }
 
     // 描いた位置での当たり判定
@@ -1012,6 +1106,13 @@ void testPanel() {
     panel.render(config, view);
     expect("パネル: 選んだカードに割り当てる選択肢がある",
            panel.buttonCenter({K::Assign, static_cast<int>(ActionType::Screenshot), 2}, x, y));
+    {
+        double ox = 0;
+        double oy = 0;
+        expect("パネル: aux の元の動きの選択肢が区画の中にある",
+               panel.buttonCenter({K::Assign, static_cast<int>(ActionType::OriginalAux), 2}, ox, oy) &&
+                   oy < SettingsPanel::kHeight - 40);
+    }
     const PanelAction assign = panel.pointerDown(x, y, 0.1);
     expect("パネル: 選択肢を押すと割り当ての操作が返る",
            assign == PanelAction({K::Assign, static_cast<int>(ActionType::Screenshot), 2}));
@@ -1031,6 +1132,22 @@ void testPanel() {
     panel.render(config, view);
     expect("パネル: 終了のボタンがある", panel.buttonCenter({K::Quit, 0, 0}, x, y) && x < SettingsPanel::kWidth &&
                                           y < SettingsPanel::kHeight);
+    {
+        // コントローラーが接続されていないときは aux を従来の動きに戻すの切り替えは、パネルを閉じても aux を使うの下で、終了のボタンより上
+        double bgX = 0;
+        double bgY = 0;
+        double ptrX = 0;
+        double ptrY = 0;
+        double checkX = 0;
+        double checkY = 0;
+        const bool found = panel.buttonCenter({K::BackgroundOn, 0, 0}, bgX, bgY) &&
+                           panel.buttonCenter({K::HeadPointerOn, 0, 0}, ptrX, ptrY) &&
+                           panel.buttonCenter({K::CheckOn, 0, 0}, checkX, checkY);
+        expect("パネル: コントローラーが接続されていないときは aux を従来の動きに戻すの切り替えがある",
+               found && bgY < ptrY && ptrY < checkY && ptrY + 28 < y - 28);
+        const PanelAction on = panel.pointerDown(ptrX, ptrY, 20.0);
+        expect("パネル: 切り替えを押すとオンの操作が返る", on.kind == K::HeadPointerOn);
+    }
     expect("パネル: 終了は 1 回目では返らない", panel.pointerDown(x, y, 1.0).kind == K::None);
     expect("パネル: 3 秒以内の 2 回目で終了", panel.pointerDown(x, y, 2.0).kind == K::Quit);
     expect("パネル: 3 秒を過ぎた 2 回目は確認からやり直し", [&] {
@@ -1500,6 +1617,7 @@ int main() {
     testPrivateFiles();
     testOsc();
     testPanelState();
+    testHeadPointer();
     std::printf("\n%d 件中 %d 件が合格\n", gTotal, gTotal - gFailures);
     return gFailures == 0 ? 0 : 1;
 }

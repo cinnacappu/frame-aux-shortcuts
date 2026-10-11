@@ -37,6 +37,7 @@ struct UiText {
     const char* title;            ///< aux ショートカット
     const char* statusRunning;    ///< 動作中
     const char* statusStandby;    ///< 待機中（本体は動いているが aux を置き換えていない）
+    const char* statusHandedBack; ///< 従来の aux（コントローラーが無いので aux を SteamVR に返している）
     const char* statusStopped;    ///< 止まっています（本体が動いていない）
     const char* tabAssign;
     const char* tabBrightness;
@@ -56,6 +57,7 @@ struct UiText {
     const char* actShot;
     const char* actPerf;
     const char* actDash;
+    const char* actOriginal;      ///< aux の元の動き
     const char* actCmd;
     const char* actNone;
     // ---- 割り当てタブ ----
@@ -73,6 +75,7 @@ struct UiText {
     const char* stPerfMissing;
     const char* stPerfUnknown;
     const char* stDash;
+    const char* stOriginal;        ///< aux の元の動きのカードの 2 行目
     const char* stCmdMissing;      ///< 割り当てたコマンドがもう無い
     const char* missingCommand;    ///< 消えたコマンド（カードの名前）
     const char* stNone;
@@ -177,6 +180,9 @@ struct UiText {
     const char* bgTitle;
     const char* bgHintOn;
     const char* bgHintOff;
+    const char* ptrTitle;          ///< カーソルのときは aux を元に戻す
+    const char* ptrHintOn;
+    const char* ptrHintOff;
     const char* checkTitle;
     const char* checkHint;
     const char* autoTitle;
@@ -259,6 +265,7 @@ struct UiText {
     const char* failShot;
     const char* failPerf;
     const char* failDash;
+    const char* failOriginal;         ///< aux の元の動きを送れません
     const char* failCmd;
     const char* failVrcVoice;         ///< VRChat に送れません
     const char* failOsc;              ///< OSC を送れません
@@ -270,6 +277,10 @@ struct UiText {
     const char* reasonNoPc;           ///< つないでいる PC が見つかりません
     const char* reasonFailed;
     const char* subSep;               ///< 押し方と理由の間（・）
+    // ---- 視界の表示（カーソルのときに aux を元に戻す・戻した） ----
+    const char* hudHandBack;          ///< aux を元の動きに戻しました
+    const char* hudHandBackSub;       ///< 頭のカーソルで操作する間
+    const char* hudShortcutsBack;     ///< aux のショートカットに戻しました
 };
 
 /**

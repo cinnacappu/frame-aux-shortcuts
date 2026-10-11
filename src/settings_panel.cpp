@@ -368,6 +368,7 @@ std::string stateText(const UiText& t, const Action& action, const Config& confi
             if (s.perfVisible < 0) return t.stPerfUnknown;
             return s.perfVisible ? t.stPerfShown : t.stPerfHidden;
         case ActionType::DashboardOpen: return t.stDash;
+        case ActionType::OriginalAux: return t.stOriginal;
         case ActionType::Command: {
             const CommandDef* command = findCommand(config.commands, view.folderCommands, action.commandId);
             if (command == nullptr) return t.stCmdMissing;
@@ -521,6 +522,8 @@ bool applyPanelAction(const PanelAction& action, Config& config) {
         case K::BadgeOff: config.muteBadge = false; break;
         case K::BackgroundOn: config.runInBackground = true; break;
         case K::BackgroundOff: config.runInBackground = false; break;
+        case K::HeadPointerOn: config.originalAuxOnHeadPointer = true; break;
+        case K::HeadPointerOff: config.originalAuxOnHeadPointer = false; break;
         case K::CheckOn: config.updateCheck = true; break;
         case K::CheckOff: config.updateCheck = false; break;
         case K::LanguageJa: config.language = Language::Ja; break;
@@ -1103,15 +1106,14 @@ void SettingsPanel::drawHeader(const Pen& pen, const UiText& t, const Config& /*
     // 題名
     const double titleW = pen.text(kPad, centerBaseline(kHeaderY, kHeaderH, 30), t.title, 30, kText, true);
     // 状態のピル（色だけで伝えない: ● と文字）
-    const char* label = view.daemon == PanelView::Daemon::Running   ? t.statusRunning
-                        : view.daemon == PanelView::Daemon::Standby ? t.statusStandby
-                                                                    : t.statusStopped;
-    const Color fill = view.daemon == PanelView::Daemon::Running   ? kSuccessTint
-                       : view.daemon == PanelView::Daemon::Standby ? kStoppedTint
-                                                                   : kDangerTint;
-    const Color fg = view.daemon == PanelView::Daemon::Running   ? kSuccess
-                     : view.daemon == PanelView::Daemon::Standby ? kTextLabel
-                                                                 : kDanger;
+    // 従来の aux（コントローラーが無いので返している）は、待機中と同じ灰色で、文字だけ分ける
+    const bool idle = view.daemon == PanelView::Daemon::Standby || view.daemon == PanelView::Daemon::HandedBack;
+    const char* label = view.daemon == PanelView::Daemon::Running      ? t.statusRunning
+                        : view.daemon == PanelView::Daemon::HandedBack ? t.statusHandedBack
+                        : idle                                         ? t.statusStandby
+                                                                       : t.statusStopped;
+    const Color fill = view.daemon == PanelView::Daemon::Running ? kSuccessTint : idle ? kStoppedTint : kDangerTint;
+    const Color fg = view.daemon == PanelView::Daemon::Running ? kSuccess : idle ? kTextLabel : kDanger;
     const double pillX = kPad + titleW + 16;
     const double pillW = 16 + 10 + 8 + pen.measure(label, 18, true) + 16;
     fillRounded(pen, pillX, kHeaderY + 10, pillW, 40, 20, fill);
@@ -2446,7 +2448,8 @@ void SettingsPanel::drawAppTab(const Pen& pen, const UiText& t, const Config& co
     const double h = kContentBottom - top;
     const double colW = (kContentW - 14) / 2;
 
-    // 左: パネルを閉じても aux を使う・新しい版の確認・SteamVR と一緒に起動・言語、下にすべて既定に戻す・終了
+    // 左: パネルを閉じても aux を使う・コントローラーが接続されていないときは aux を従来の動きに戻す・新しい版の確認・SteamVR と一緒に起動・言語、
+    // 下にすべて既定に戻す・終了
     fillRounded(pen, kPad, top, colW, h, 20, kCard);
     const double x = kPad + 22;
     const double right = kPad + colW - 22;
@@ -2469,9 +2472,11 @@ void SettingsPanel::drawAppTab(const Pen& pen, const UiText& t, const Config& co
     const int autoSelected = autostart.state == AutostartStatus::State::Enabled    ? 0
                              : autostart.state == AutostartStatus::State::Disabled ? 1
                                                                                    : -1;
-    const Row rows[4] = {
+    const Row rows[] = {
         {t.bgTitle, config.runInBackground ? t.bgHintOn : t.bgHintOff, K::BackgroundOn, K::BackgroundOff, t.on, t.off,
          config.runInBackground ? 0 : 1, true},
+        {t.ptrTitle, config.originalAuxOnHeadPointer ? t.ptrHintOn : t.ptrHintOff, K::HeadPointerOn, K::HeadPointerOff,
+         t.on, t.off, config.originalAuxOnHeadPointer ? 0 : 1, true},
         {t.checkTitle, t.checkHint, K::CheckOn, K::CheckOff, t.on, t.off, config.updateCheck ? 0 : 1, true},
         {t.autoTitle, autoHint, K::AutostartOn, K::AutostartOff, t.on, t.off, autoSelected, autoInstalled && !autostart.busy},
         // 言語の名前は、どちらの言語で表示していてもその言語自身の書き方にする
@@ -2481,7 +2486,8 @@ void SettingsPanel::drawAppTab(const Pen& pen, const UiText& t, const Config& co
     // 下の 2 つのボタンの上に収まるよう、行の間を詰める（更新の帯が高いとき）
     const double by = top + h - 16 - 56;
     const double rowH = 64;
-    const double rowGap = std::clamp((by - 12 - (top + 14) - 4 * rowH) / 3, 0.0, 10.0);
+    constexpr int rowCount = static_cast<int>(sizeof(rows) / sizeof(rows[0]));
+    const double rowGap = std::clamp((by - 12 - (top + 14) - rowCount * rowH) / (rowCount - 1), 0.0, 10.0);
     double y = top + 14;
     for (const Row& row : rows) {
         // 右の切り替えを先に置いて、残りの幅に見出しを入れる

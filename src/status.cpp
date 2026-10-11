@@ -117,6 +117,7 @@ std::string statusToJson(const Status& s) {
         << "  \"version\": " << quote(s.version) << ",\n"
         << "  \"pid\": " << s.pid << ",\n"
         << "  \"active\": " << (s.active ? "true" : "false") << ",\n"
+        << "  \"handed_back\": " << (s.handedBack ? "true" : "false") << ",\n"
         << "  \"vr_connected\": " << (s.vrConnected ? "true" : "false") << ",\n";
     if (s.lastPress.kind == PressRecord::Kind::None) {
         out << "  \"last_press\": null,\n";
@@ -149,6 +150,7 @@ bool parseStatusText(const std::string& text, Status& status, std::string& error
     s.version = readText(root, "version");
     s.pid = static_cast<int>(readNumber(root, "pid", 0));
     s.active = readTriState(root, "active") == 1;
+    s.handedBack = readTriState(root, "handed_back") == 1;
     s.vrConnected = readTriState(root, "vr_connected") == 1;
     if (const JsonValue* press = root.get("last_press"); press != nullptr && press->isObject()) {
         PressRecord& p = s.lastPress;

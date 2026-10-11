@@ -64,6 +64,7 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
             case ActionType::Screenshot: out.title = t.failShot; break;
             case ActionType::PerfOverlayToggle: out.title = t.failPerf; break;
             case ActionType::DashboardOpen: out.title = t.failDash; break;
+            case ActionType::OriginalAux: out.title = t.failOriginal; break;
             case ActionType::Command: out.title = t.failCmd; break;
             case ActionType::None: return false;
         }
@@ -108,6 +109,7 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
             out.title = press.value == "shown" ? t.hudPerfShown : (press.value == "hidden" ? t.hudPerfHidden : t.hudPerfToggled);
             break;
         case ActionType::DashboardOpen: return false;  // 開いたダッシュボードが手応えになる
+        case ActionType::OriginalAux: return false;  // 開く・クリックした結果が手応えになる（失敗だけ出す）
         case ActionType::Command:
             out.icon = Icon::Terminal;
             out.tone = HudToast::Tone::Neutral;
@@ -118,4 +120,20 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
     }
     toast = out;
     return true;
+}
+
+HudToast makeHandBackToast(bool handedBack, Language language) {
+    const UiText& t = uiText(language);
+    HudToast out;
+    out.icon = Icon::Pointer;
+    if (handedBack) {
+        out.tone = HudToast::Tone::Accent;
+        out.title = t.hudHandBack;
+        out.sub = t.hudHandBackSub;
+    } else {
+        // 戻したわけ（コントローラーがつながった・設定をオフにした）が 2 つあるので、2 行目は書かない
+        out.tone = HudToast::Tone::Neutral;
+        out.title = t.hudShortcutsBack;
+    }
+    return out;
 }

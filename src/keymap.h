@@ -1,4 +1,4 @@
-// gpio-keys（aux ボタンと音量 + があるデバイス）のキー対応表の置き換えと、元への戻し。
+// gpio-keys（aux ボタンと音量 + があるデバイス）のキー対応表の置き換えと、元への戻し。aux の元の動きの中継もここ。
 // EVIOCGRAB はしない（同じデバイスに音量 + があり、掴むと SteamVR に届かなくなる）。
 #pragma once
 
@@ -84,6 +84,25 @@ int remap(const std::string& devicePath, std::string& message);
  * @return 戻した項目の数。置き換えていなければ 0、失敗したら -1
  */
 int restore();
+
+/**
+ * aux の元の動き: aux を 1 回押したのと同じ入力（KEY_SELECT の押して離す）を gpio-keys に書いて、SteamVR に届ける。
+ * 置き換え中（656）は、デバイスが KEY_SELECT を持っていないので書いても捨てられる。そのため、その間だけ 656 → 353 に戻して書き、
+ * 書けても書けなくても 353 → 656 に置き直す（約 80 ms。その間に本物の aux を押すと SteamVR に行く）。
+ * 置き換えていなければ、書くだけ。書いた KEY_SELECT は、本体の押し方の読み取り（656 だけを数える）には入らない。
+ * attach() していないプロセス（--test-action）では、置き換えの持ち主ではないので、置き換え中なら書かずに失敗にする。
+ * メインスレッドから呼ぶ（activate()・deactivate() と同じスレッド）。
+ * @param message 結果の説明（ログ用）
+ * @return 書けて、置き換えも元どおりなら true
+ */
+bool pressOriginal(std::string& message);
+
+/**
+ * pressOriginal() で置き直せなかったか（aux が SteamVR に届くままかもしれない）。返したら忘れる。
+ * 本体はこれを見たら、置き換えていないことにして置き換えをやり直す。メインスレッドから呼ぶ。
+ * @return 置き直せなかったことがあれば true
+ */
+bool takeRemapLost();
 
 /**
  * 致命的なシグナル（SIGSEGV・SIGABRT・SIGBUS・SIGFPE・SIGILL など）で、対応表を戻してから同じシグナルで落ちるようにする。

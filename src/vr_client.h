@@ -2,6 +2,8 @@
 // 使う API の薄い包み。視界の表示のオーバーレイは hud_overlay.h。
 #pragma once
 
+#include "head_pointer.h"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -133,6 +135,13 @@ public:
      * @return 結果が来ていれば true（まだなら false）
      */
     bool screenshotResult(uint32_t handle, bool& ok);
+
+    /**
+     * カーソルの判定に使う値を読む（読むだけ。つながっているコントローラーの数・ダッシュボードの表示・ポインターの機器）。
+     * @param sample 読めたときの書き込み先
+     * @return つながっていて読めたら true
+     */
+    bool readPointer(PointerSample& sample);
 
     /** つながっていれば切る（VR_Shutdown）。 */
     void shutdown();

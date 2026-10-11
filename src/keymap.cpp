@@ -1,5 +1,6 @@
 // キー対応表の置き換えと戻しの実装。
-// 書き込むのは gpio-keys の対応表（EVIOCSKEYCODE_V2）だけ。sysfs・GPIO・デバイスツリーには触らない。
+// 書き込むのは gpio-keys の対応表（EVIOCSKEYCODE_V2）と、aux の元の動きの入力（evdev への input_event の write）だけ。
+// sysfs・GPIO・デバイスツリーには触らない。
 #include "keymap.h"
 
 #include <dirent.h>
@@ -22,10 +23,17 @@ namespace {
 /** 対応表を読むときの index の上限（gpio-keys は 2 項目だが、念のため余裕を持たせる）。 */
 constexpr unsigned kMaxKeymapEntries = 64;
 
+/** 元の aux の押して離すの間（実機で 0.08 秒で SteamVR に届いた）。 */
+constexpr useconds_t kOriginalPressHoldUs = 80 * 1000;
+/** 置き直しに失敗したときに試し直す回数。 */
+constexpr int kRemapRetries = 3;
+
 /** 置き換えを守っている gpio-keys の fd（シグナルハンドラーから読むので sig_atomic_t）。 */
 volatile std::sig_atomic_t gGuardFd = -1;
 /** 置き換えたプロセスの PID。fork した子プロセスが落ちても、親の置き換えを戻さないようにする。 */
 volatile std::sig_atomic_t gOwnerPid = 0;
+/** pressOriginal() で置き直せず、353 のまま残ったかもしれない（takeRemapLost() で一度だけ返す）。メインスレッドだけで使う。 */
+bool gRemapLost = false;
 
 /**
  * index を指定して対応表の 1 項目を読む。
@@ -57,6 +65,57 @@ void onFatalSignal(int signal) {
 /** atexit から呼ぶ戻し（std::exit で終わった場合の保険）。 */
 void restoreAtExit() {
     keymap_guard::restore();
+}
+
+/**
+ * キーの押し・離しを 1 つ（EV_KEY と SYN_REPORT）デバイスに書く（evdev への書き込みは、ほかの読み手への入力になる）。
+ * 時刻はカーネルが付けるので 0 のまま。
+ * @param fd 開いたデバイス（書ける）
+ * @param code キーコード
+ * @param value 1 なら押す、0 なら離す
+ * @return 書けたら true
+ */
+bool writeKey(int fd, unsigned code, int value) {
+    input_event events[2] {};
+    events[0].type = EV_KEY;
+    events[0].code = static_cast<__u16>(code);
+    events[0].value = value;
+    events[1].type = EV_SYN;
+    events[1].code = SYN_REPORT;
+    events[1].value = 0;
+    const ssize_t written = ::write(fd, events, sizeof(events));
+    return written == static_cast<ssize_t>(sizeof(events));
+}
+
+/**
+ * KEY_SELECT を押して離す（間は kOriginalPressHoldUs）。押したのに離せなかったときも、離すのを 1 回試し直す。
+ * @param fd 開いたデバイス（書ける）
+ * @param error 書けなかったときの理由
+ * @return 押して離すを書けたら true
+ */
+bool writeOriginalPress(int fd, std::string& error) {
+    if (!writeKey(fd, kAuxOriginalCode, 1)) {
+        error = std::string("押すのを書けません: ") + std::strerror(errno);
+        return false;
+    }
+    ::usleep(kOriginalPressHoldUs);
+    if (writeKey(fd, kAuxOriginalCode, 0)) return true;
+    error = std::string("離すのを書けません: ") + std::strerror(errno);
+    writeKey(fd, kAuxOriginalCode, 0);
+    return false;
+}
+
+/**
+ * 353 → 656 に置き直す（失敗したら少し待って試し直す）。
+ * @param fd 開いたデバイス
+ * @return 置き直せたら true
+ */
+bool remapAgain(int fd) {
+    for (int i = 0; i < kRemapRetries; ++i) {
+        if (swapKeycode(fd, kAuxOriginalCode, kAuxStandInCode) >= 0) return true;
+        ::usleep(10 * 1000);
+    }
+    return false;
 }
 
 }  // namespace
@@ -215,6 +274,66 @@ int restore() {
     if (fd < 0) return 0;
     if (::getpid() != gOwnerPid) return 0;
     return swapKeycode(fd, kAuxStandInCode, kAuxOriginalCode);
+}
+
+bool pressOriginal(std::string& message) {
+    // 置き換えの持ち主（attach したプロセス）なら守っている fd を使う。そうでなければ（--test-action）自分で開く
+    const bool owner = gGuardFd >= 0 && ::getpid() == gOwnerPid;
+    int fd = owner ? static_cast<int>(gGuardFd) : -1;
+    if (!owner) {
+        const std::string device = findGpioKeysDevice();
+        if (device.empty()) {
+            message = "gpio-keys が見つかりません";
+            return false;
+        }
+        fd = ::open(device.c_str(), O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            message = device + " を開けません: " + std::strerror(errno);
+            return false;
+        }
+    }
+    const auto keymap = readKeymap(fd);
+    const bool remapped = std::any_of(keymap.begin(), keymap.end(),
+                                      [](const auto& item) { return item.second == kAuxStandInCode; });
+    const bool hasOriginal = std::any_of(keymap.begin(), keymap.end(),
+                                         [](const auto& item) { return item.second == kAuxOriginalCode; });
+    bool ok = false;
+    std::string error;
+    if (!remapped) {
+        if (!hasOriginal) {
+            message = "対応表に aux（" + std::to_string(kAuxOriginalCode) + "）がありません: " + formatKeymap(keymap);
+        } else {
+            ok = writeOriginalPress(fd, error);
+            message = ok ? "置き換えていないので、そのまま KEY_SELECT を押して離しました" : error;
+        }
+    } else if (!owner) {
+        message = "本体が aux を置き換えているので書きません（本体の押し方に割り当てて試してください）";
+    } else if (swapKeycode(fd, kAuxStandInCode, kAuxOriginalCode) < 0) {
+        message = "対応表を一時的に戻せません: " + std::string(std::strerror(errno));
+        if (!remapAgain(fd)) gRemapLost = true;  // 途中まで戻っていても、置き換えに揃える
+    } else {
+        // ここから置き直すまでの間（約 80 ms）は、本物の aux も SteamVR に届く
+        const bool wrote = writeOriginalPress(fd, error);
+        const bool back = remapAgain(fd);
+        ok = wrote && back;
+        if (!back) {
+            const int err = errno;  // readKeymap の ioctl で上書きされる前に取る
+            gRemapLost = true;
+            message = "置き直せません（aux が SteamVR に届くままです）: " + std::string(std::strerror(err)) + " " +
+                      formatKeymap(readKeymap(fd));
+        } else {
+            message = wrote ? "一時的に 353 に戻して KEY_SELECT を押して離し、656 に置き直しました"
+                            : error + "（656 には置き直しました）";
+        }
+    }
+    if (!owner) ::close(fd);
+    return ok;
+}
+
+bool takeRemapLost() {
+    const bool lost = gRemapLost;
+    gRemapLost = false;
+    return lost;
 }
 
 void installCrashHandlers() {

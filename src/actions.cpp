@@ -1,13 +1,14 @@
 // アクションの実行の実装。
 // 書き込むのは: PipeWire のミュート（wpctl）、SteamVR の設定（IVRSettings）、frame-perf-overlay へのシグナル、
 // SteamVR へのメールボックスの送信、スクリーンショットの保存先のフォルダ（PNG は vrcompositor が書く）、
-// 組み込みのコマンドの OSC（つないでいる PC への UDP）だけ。
+// 組み込みのコマンドの OSC（つないでいる PC への UDP）、aux の元の動きの入力（gpio-keys への write。keymap.h）だけ。
 // sysfs・/opt・/etc には触らない。PipeWire・WirePlumber の再起動もしない。トラッキング用のカメラも開かない。
 #include "actions.h"
 
 #include "brightness.h"
 #include "command.h"
 #include "commands.h"
+#include "keymap.h"
 #include "osc.h"
 #include "room_view.h"
 #include "runtime.h"
@@ -259,6 +260,15 @@ PreparedAction prepareAction(const Action& action, const Config& config, VrClien
             out.outcome.ok = vr.showDashboard(error);
             if (!out.outcome.ok) out.outcome.reason = vr.connected() ? "failed" : "no_steamvr";
             out.outcome.detail = out.outcome.ok ? "ダッシュボードを開くよう頼みました" : "ダッシュボードを開けません: " + error;
+            break;
+        }
+        case ActionType::OriginalAux: {
+            // 置き換えの一時的な戻しがあるので、メインスレッド（置き換え・戻しと同じスレッド）でその場で行う（約 80 ms 止まる）
+            out.done = true;
+            std::string message;
+            out.outcome.ok = keymap_guard::pressOriginal(message);
+            if (!out.outcome.ok) out.outcome.reason = "failed";
+            out.outcome.detail = "aux の元の動き: " + message;
             break;
         }
         case ActionType::Command: {

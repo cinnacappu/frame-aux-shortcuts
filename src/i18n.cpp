@@ -60,6 +60,7 @@ UiText makeJapanese() {
     t.title = "aux ショートカット";
     t.statusRunning = "動作中";
     t.statusStandby = "待機中";
+    t.statusHandedBack = "従来の aux";
     t.statusStopped = "止まっています";
     t.tabAssign = "割り当て";
     t.tabBrightness = "明るさ";
@@ -78,6 +79,7 @@ UiText makeJapanese() {
     t.actShot = "スクリーンショット";
     t.actPerf = "パフォーマンス表示";
     t.actDash = "ダッシュボード";
+    t.actOriginal = "aux の元の動き";
     t.actCmd = "コマンド";
     t.actNone = "なし";
     t.recentFormat = "さっき押した %s";
@@ -93,7 +95,8 @@ UiText makeJapanese() {
     t.stPerfStopped = "frame-perf-overlay が止まっています";
     t.stPerfMissing = "frame-perf-overlay がありません";
     t.stPerfUnknown = "表示を切り替えます";
-    t.stDash = "aux ボタンの元の動き";
+    t.stDash = "ダッシュボードを開きます";
+    t.stOriginal = "元の 1 回押し（開く・クリック）";
     t.stCmdMissing = "このコマンドはもうありません";
     t.missingCommand = "消えたコマンド";
     t.stNone = "何もしない";
@@ -192,6 +195,9 @@ UiText makeJapanese() {
     t.bgTitle = "パネルを閉じても aux を使う";
     t.bgHintOn = "パネルを閉じても、裏でショートカットが動き続けます";
     t.bgHintOff = "パネルを閉じると、aux は元の動きに戻ります";
+    t.ptrTitle = "コントローラー未接続時は従来の aux";
+    t.ptrHintOn = "aux を従来の動きに戻します（開く・クリック）";
+    t.ptrHintOff = "aux はショートカットのまま";
     t.checkTitle = "新しい版の確認";
     t.checkHint = "起動時と 1 時間に 1 回、GitHub を見に行きます";
     t.autoTitle = "SteamVR と一緒に起動";
@@ -271,6 +277,7 @@ UiText makeJapanese() {
     t.failShot = "スクリーンショットを撮れませんでした";
     t.failPerf = "パフォーマンス表示を切り替えられません";
     t.failDash = "ダッシュボードを開けません";
+    t.failOriginal = "aux の元の動きを送れません";
     t.failCmd = "コマンドを実行できません";
     t.failVrcVoice = "VRChat に送れません";
     t.failOsc = "OSC を送れません";
@@ -282,6 +289,9 @@ UiText makeJapanese() {
     t.reasonNoPc = "つないでいる PC が見つかりません";
     t.reasonFailed = "うまくいきませんでした";
     t.subSep = "・";
+    t.hudHandBack = "aux を従来の動きに戻しました";
+    t.hudHandBackSub = "コントローラーが接続されていない間";
+    t.hudShortcutsBack = "aux のショートカットに戻しました";
     return t;
 }
 
@@ -294,6 +304,7 @@ UiText makeEnglish() {
     t.title = "aux Shortcuts";
     t.statusRunning = "Running";
     t.statusStandby = "Standby";
+    t.statusHandedBack = "Normal aux";
     t.statusStopped = "Stopped";
     t.tabAssign = "Assign";
     t.tabBrightness = "Brightness";
@@ -312,6 +323,7 @@ UiText makeEnglish() {
     t.actShot = "Screenshot";
     t.actPerf = "Perf overlay";
     t.actDash = "Dashboard";
+    t.actOriginal = "Original aux";
     t.actCmd = "Command";
     t.actNone = "None";
     t.recentFormat = "Pressed %s";
@@ -327,7 +339,8 @@ UiText makeEnglish() {
     t.stPerfStopped = "frame-perf-overlay is not running";
     t.stPerfMissing = "frame-perf-overlay missing";
     t.stPerfUnknown = "Shows or hides it";
-    t.stDash = "What aux does normally";
+    t.stDash = "Opens the SteamVR dashboard";
+    t.stOriginal = "One normal press: open or click";
     t.stCmdMissing = "This command no longer exists";
     t.missingCommand = "Missing command";
     t.stNone = "Does nothing";
@@ -426,6 +439,9 @@ UiText makeEnglish() {
     t.bgTitle = "Keep aux on when closed";
     t.bgHintOn = "Shortcuts keep working in the background";
     t.bgHintOff = "Closing the panel gives aux back to SteamVR";
+    t.ptrTitle = "Normal aux when no controller is connected";
+    t.ptrHintOn = "Without controllers, aux opens the dashboard and clicks";
+    t.ptrHintOff = "Shortcuts stay on even without controllers";
     t.checkTitle = "Check for updates";
     t.checkHint = "Looks on GitHub at start and every hour";
     t.autoTitle = "Start with SteamVR";
@@ -505,6 +521,7 @@ UiText makeEnglish() {
     t.failShot = "Couldn't take a screenshot";
     t.failPerf = "Couldn't toggle the perf overlay";
     t.failDash = "Couldn't open the dashboard";
+    t.failOriginal = "Couldn't send the aux press";
     t.failCmd = "Couldn't run the command";
     t.failVrcVoice = "Couldn't send to VRChat";
     t.failOsc = "Couldn't send OSC";
@@ -516,6 +533,9 @@ UiText makeEnglish() {
     t.reasonNoPc = "No connected PC found";
     t.reasonFailed = "Something went wrong";
     t.subSep = " · ";
+    t.hudHandBack = "aux is back to normal";
+    t.hudHandBackSub = "While no controller is connected";
+    t.hudShortcutsBack = "aux shortcuts are back";
     return t;
 }
 
@@ -566,6 +586,7 @@ const char* actionLabel(Language language, ActionType type) {
         case ActionType::Screenshot: return t.actShot;
         case ActionType::PerfOverlayToggle: return t.actPerf;
         case ActionType::DashboardOpen: return t.actDash;
+        case ActionType::OriginalAux: return t.actOriginal;
         case ActionType::Command: return t.actCmd;
         case ActionType::None: return t.actNone;
     }

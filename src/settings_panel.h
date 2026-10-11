@@ -67,6 +67,8 @@ struct PanelAction {
         BadgeOff,
         BackgroundOn,
         BackgroundOff,
+        HeadPointerOn,     ///< コントローラーが接続されていないときは aux を従来の動きに戻す（original_aux_on_head_pointer）
+        HeadPointerOff,
         CheckOn,
         CheckOff,
         LanguageJa,
@@ -138,6 +140,7 @@ struct PanelView {
     enum class Daemon {
         Running,  ///< 動いていて、aux を置き換えている
         Standby,  ///< 動いているが、aux は元の動き（パネルを閉じたら戻す設定で、パネルがまだ見えていない間など）
+        HandedBack,  ///< 動いているが、コントローラーが無いので aux を SteamVR に返している
         Stopped,  ///< 動いていない
     };
     Daemon daemon = Daemon::Stopped;

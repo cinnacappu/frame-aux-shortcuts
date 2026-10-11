@@ -1,6 +1,6 @@
 # frame-aux-shortcuts
 
-Shortcuts on the Steam Frame's **aux button** (the small button above the power button). Give each of six ways of pressing it — 1 to 5 presses and a long press — its own action: mute the mic, step through brightness levels, turn passthrough on and off, take a screenshot, show or hide [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay), open the dashboard, or run a command of your own. A short sound and a small notice in your view tell you what happened. Everything is set up from a tab in the SteamVR dashboard. It runs on the headset itself and needs no sudo.
+Shortcuts on the Steam Frame's **aux button** (the small button above the power button). Give each of six ways of pressing it — 1 to 5 presses and a long press — its own action: mute the mic, step through brightness levels, turn passthrough on and off, take a screenshot, show or hide [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay), open the dashboard, do what aux normally does, or run a command of your own. A short sound and a small notice in your view tell you what happened. Everything is set up from a tab in the SteamVR dashboard. It runs on the headset itself and needs no sudo.
 
 [日本語版はこちら](README.ja.md)
 
@@ -21,7 +21,7 @@ The images were written out by the programs themselves, not captured in the head
 | 1–5 presses | 0.35 s after you let go without pressing again | 1: mic mute, 2: brightness, 3: passthrough, 4: screenshot, 5: perf overlay |
 | Long press | as soon as you've held it for 0.6 s | Dashboard |
 
-Six or more presses do nothing, so a miscount never fires the wrong action. The volume buttons are not affected. While the app runs, SteamVR no longer sees aux (normally one press opens the dashboard and two toggle passthrough); your assignments replace that.
+Six or more presses do nothing, so a miscount never fires the wrong action. The volume buttons are not affected. While the app runs, SteamVR no longer sees aux (normally one press opens the dashboard and two toggle passthrough); your assignments replace that. If you use the head cursor (the dot in the middle of your view) instead of controllers, aux is your click: assign **Original aux**, or turn on **Normal aux when no controller is connected**.
 
 Actions you can assign:
 
@@ -30,7 +30,8 @@ Actions you can assign:
 - **Passthrough**: on / off, through a private SteamVR interface (see [How it works](#how-it-works)).
 - **Screenshot**: saves what you see to `~/Pictures/frame-aux-shortcuts/` and adds it to Steam's screenshots.
 - **Perf overlay**: shows or hides [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay), if it is installed and running.
-- **Dashboard**: opens the SteamVR dashboard (what aux does normally).
+- **Dashboard**: opens the SteamVR dashboard.
+- **Original aux**: the same as one press of aux without this app. It opens the dashboard if it is closed, and clicks with the head cursor when the cursor is showing (clicking outside the dashboard closes it). For a moment (about 0.08 s) the app puts the key map back and passes an aux press to SteamVR.
 - **A command** of your own (see [Commands](#commands)), or **None**.
 
 In your view, a notice shows what happened for about 2 seconds, and "Mic muted" stays at the top while the mic is muted (however it was muted). A short sound plays on each press, a different one when the action failed. Each of these can be turned off.
@@ -46,7 +47,7 @@ Open the SteamVR dashboard and pick the **aux Shortcuts** tab at the bottom. Cha
 - **Presses**: the long press time (0.3–1.5 s) and the count gap (0.2–0.8 s), with a timeline.
 - **Commands**: add (also from presets), edit, try, delete and reorder your commands.
 - **Display**: sound, notice and muted indicator on / off.
-- **App**: updates, keep aux on when the panel is closed, start with SteamVR, language, reset, quit. On the right, the apps it uses (frame-perf-overlay, frame-jp-keyboard) and a list of all my Frame apps; **Install** opens Konsole with the one-line installer, after showing you the command.
+- **App**: updates, keep aux on when the panel is closed, normal aux when no controller is connected, start with SteamVR, language, reset, quit. On the right, the apps it uses (frame-perf-overlay, frame-jp-keyboard) and a list of all my Frame apps; **Install** opens Konsole with the one-line installer, after showing you the command.
 
 ## Requirements
 
@@ -93,6 +94,7 @@ It installs `~/.local/bin/frame-aux-shortcuts` (the background part) and `frame-
 - **Press aux.** The shortcuts work whenever SteamVR runs; nothing else needs to be open.
 - **The + button** in the dashboard lists **Frame Aux Shortcuts**; it opens the panel and starts the background part if needed.
 - **Closing the panel** keeps the shortcuts working (unless you turn off **Keep aux on when closed**).
+- **Normal aux when no controller is connected** (App tab, off by default): while no controller is connected (SteamVR uses the head cursor), aux goes back to SteamVR so you can click with it. When a controller connects, the shortcuts come back. A notice in your view tells you when it switches (`original_aux_on_head_pointer` in the settings file).
 - **Quit panel and background** (App tab, press twice) gives aux back to SteamVR until the next SteamVR start.
 - **Reset everything** (App tab, press twice) resets all settings except the language — **including your registered commands**.
 
@@ -131,7 +133,7 @@ Tap the **Name** or **Command to run** field and the SteamVR keyboard opens; tex
 
 ## How it works
 
-- Linux sees aux as `KEY_SELECT` on the `gpio-keys` input device. The background part changes that device's key map so aux sends an unused key; SteamVR then ignores it and the app reads the presses itself. It doesn't grab the device, so volume up still works. The key map lives only in kernel memory: it is put back when the app ends (including crashes), and a restart always resets it. No sudo is needed (the `steamos` user is in the `input` group).
+- Linux sees aux as `KEY_SELECT` on the `gpio-keys` input device. The background part changes that device's key map so aux sends an unused key; SteamVR then ignores it and the app reads the presses itself. It doesn't grab the device, so volume up still works. **Original aux** puts the key map back for a moment, writes a `KEY_SELECT` press and release to the same device (writing to an evdev device is input for its other readers), and changes the key map again right away. The key map lives only in kernel memory: it is put back when the app ends (including crashes), and a restart always resets it. No sudo is needed (the `steamos` user is in the `input` group).
 - Passthrough has no public OpenVR call, so the app sends the request to a **private**, undocumented interface of SteamVR's local web server (`127.0.0.1`, on the headset). Everything else uses the public OpenVR API and standard tools (`wpctl`, `pw-play`, `systemctl`).
 - For VRChat mute, the app reads from `/proc` which PC the Steam Link client (`vrlink`) is connected to over UDP (read only), then runs `frame-aux-shortcuts --send-osc auto:9000 /input/Voice`: it sends 1, then 0 after 0.15 s.
 - It never writes to sysfs, GPIO, `/persist`, `/opt`, `/etc` or Steam's files, never touches the cameras, and never restarts PipeWire or SteamVR.

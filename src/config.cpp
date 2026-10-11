@@ -31,6 +31,7 @@ const std::vector<ActionSpec> kActionSpecs = {
     {ActionType::Screenshot, "screenshot", true},
     {ActionType::PerfOverlayToggle, "perf_overlay_toggle", false},
     {ActionType::DashboardOpen, "dashboard_open", true},
+    {ActionType::OriginalAux, "original_aux", false},
     {ActionType::Command, "command", false},
     {ActionType::None, "none", false},
 };
@@ -431,8 +432,8 @@ bool parseConfigText(const std::string& text, Config& out, std::vector<std::stri
     Config config;  // 書かれていない項目は既定値
     warnUnknownKeys(root,
                     {"version", "long_press_ms", "multi_press_gap_ms", "brightness_levels", "sound", "hud",
-                     "screenshot_dir", "screenshot_to_steam", "run_in_background", "language", "update_check", "commands",
-                     "command_order", "actions"},
+                     "screenshot_dir", "screenshot_to_steam", "run_in_background", "original_aux_on_head_pointer", "language",
+                     "update_check", "commands", "command_order", "actions"},
                     "", warnings);
     if (const JsonValue* version = root.get("version")) {
         if (!version->isNumber()) {
@@ -479,6 +480,7 @@ bool parseConfigText(const std::string& text, Config& out, std::vector<std::stri
     if (config.screenshotDir.empty()) config.screenshotDir = kDefaultScreenshotDir;
     readBool(root, "screenshot_to_steam", config.screenshotToSteam, warnings);
     readBool(root, "run_in_background", config.runInBackground, warnings);
+    readBool(root, "original_aux_on_head_pointer", config.originalAuxOnHeadPointer, warnings);
     readBool(root, "update_check", config.updateCheck, warnings);
     if (const JsonValue* language = root.get("language")) {
         if (!language->isString() || !parseLanguage(language->text, config.language)) {
@@ -551,6 +553,7 @@ std::string configToJson(const Config& config) {
         << "  \"screenshot_dir\": " << jsonString(config.screenshotDir) << ",\n"
         << "  \"screenshot_to_steam\": " << (config.screenshotToSteam ? "true" : "false") << ",\n"
         << "  \"run_in_background\": " << (config.runInBackground ? "true" : "false") << ",\n"
+        << "  \"original_aux_on_head_pointer\": " << (config.originalAuxOnHeadPointer ? "true" : "false") << ",\n"
         << "  \"language\": \"" << languageCode(config.language) << "\",\n"
         << "  \"update_check\": " << (config.updateCheck ? "true" : "false") << ",\n"
         << "  \"commands\": [";

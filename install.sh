@@ -76,6 +76,9 @@ refresh_caches() {
     if command -v gtk-update-icon-cache >/dev/null 2>&1 && [[ -f "$icons/index.theme" ]]; then
         gtk-update-icon-cache -q "$icons" || true
     fi
+    # Steam は GTK3 でアイコンを探し、icons フォルダ自体の更新時刻が変わったときだけ読み直す。
+    # これが無いと、Steam を再起動するまで＋の一覧にアイコンが出ない
+    touch "$data_home/icons" 2>/dev/null || true
 }
 
 if [[ "$uninstall" == 1 ]]; then
