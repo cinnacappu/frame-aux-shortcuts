@@ -1,6 +1,6 @@
 # frame-aux-shortcuts
 
-Shortcuts on the Steam Frame's **aux button** (the small button above the power button). Give each of six ways of pressing it — 1 to 5 presses and a long press — and two or three taps on the headset its own action: mute the mic, step through brightness levels, turn passthrough on and off, take a screenshot, show or hide [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay), open the dashboard, recenter the view, do what aux normally does, play / pause or skip the music playing on the Frame, or run a command of your own. A short sound and a small notice in your view tell you what happened. Everything is set up from a tab in the SteamVR dashboard. It runs on the headset itself and needs no sudo.
+Shortcuts on the Steam Frame's **aux button** (the small button above the power button). Give each of six ways of pressing it — 1 to 5 presses and a long press — and two or three taps on the headset its own action: mute the mic, step through brightness levels, turn passthrough on and off, take a screenshot, show or hide [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay), open the dashboard, recenter the view, do what aux normally does, play / pause or skip the music playing on the Frame, recenter your eyes, run an eye fit or relearn your eyes in [frameeyeosc](https://github.com/sasaken1102r/frameeyeosc), or run a command of your own. A short sound and a small notice in your view tell you what happened. Everything is set up from a tab in the SteamVR dashboard. It runs on the headset itself and needs no sudo.
 
 [日本語版はこちら](README.ja.md)
 
@@ -37,6 +37,8 @@ Actions you can assign:
 - **Recenter view**: makes the direction you are facing the front, the same as **Recenter** in the dashboard (or holding the controller's System button). It works only while you are wearing the headset. Like the built-in one, SteamVR keeps the new direction.
 - **Original aux**: the same as one press of aux without this app. It opens the dashboard if it is closed, and clicks with the head cursor when the cursor is showing (clicking outside the dashboard closes it). For a moment (about 0.08 s) the app puts the key map back and passes an aux press to SteamVR.
 - **Play / pause**, **Next track**, **Previous track** (the **Music** side of the list): control music or video playing on the Frame itself, in apps that support MPRIS such as Chrome and Chromium. If several are playing, it picks the one it controlled last; after a pause, play / pause resumes the same one. The notice shows the track title. It can't control audio from a PC streamed over Steam Link.
+- **Recenter eyes**, **Eye fit** (the **Eyes** side of the list): ask the panel of [frameeyeosc](https://github.com/sasaken1102r/frameeyeosc) (the app that sends eye tracking to VRChat) for **Re-center only** or **Fit my eyes**. For example, put Recenter eyes on 1 press and Eye fit on a long press. Pressing Eye fit again while a fit is running stops it (for an accidental long press). Both work only while you wear the headset, and recentering works once you have done an eye fit. When one starts there is no notice in your view, only the sound, so your eyes stay on frameeyeosc's dot ahead. Needs a frameeyeosc with `--action` (0.7.10 or later); the list and the card say so when it is missing or too old. They don't work while frameeyeosc's fit values are set on its command line.
+- **Relearn my eyes** (the **Eyes** side of the list): has frameeyeosc's eye cameras learn your relaxed eyes again, the same as **Relearn my eyes** on its Eye cameras tab (about 30 s). The calibration stays as it is. There is no dot to look at, so a notice "Relearning your eyes" shows when it starts. It works only while the eye cameras are used for the eyelids and you wear the headset; the notice says so when the eye cameras aren't available (calibrating, no video and so on).
 - **A command** of your own (see [Commands](#commands)), or **None**.
 
 In your view, a notice shows what happened for about 2 seconds, and "Mic muted" stays at the top while the mic is muted (however it was muted). A short sound plays on each press, a different one when the action failed. Each of these can be turned off.
@@ -47,7 +49,7 @@ Open the SteamVR dashboard and pick the **aux Shortcuts** tab at the bottom. Cha
 
 ![The Commands tab](docs/images/panel-commands-en.png)
 
-- **Assign**: a card for each press and tap with its current state; pick a card, then an action, a music control or one of your commands.
+- **Assign**: a card for each press and tap with its current state; pick a card, then an action, a music control, an eye action or one of your commands.
 - **Brightness**: the brightness levels.
 - **Presses**: the long press time (0.3–1.5 s) and the count gap (0.2–0.8 s), with a timeline.
 - **Commands**: add (also from presets), edit, try, delete and reorder your commands.
@@ -57,7 +59,7 @@ Open the SteamVR dashboard and pick the **aux Shortcuts** tab at the bottom. Cha
 ## Requirements
 
 - A Steam Frame with Developer Mode on (Steam Settings → System → "Enable Developer Mode"), and SteamVR.
-- No sudo; everything goes into your home folder. Optional: [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay) for the perf overlay action.
+- No sudo; everything goes into your home folder. Optional: [frame-perf-overlay](https://github.com/sasaken1102r/frame-perf-overlay) for the perf overlay action, and [frameeyeosc](https://github.com/sasaken1102r/frameeyeosc) (0.7.10 or later) for the eye actions.
 
 ## Install
 
@@ -143,6 +145,7 @@ Tap the **Name** or **Command to run** field and the SteamVR keyboard opens; tex
 - Passthrough has no public OpenVR call, so the app sends the request to a **private**, undocumented interface of SteamVR's local web server (`127.0.0.1`, on the headset). Everything else uses the public OpenVR API and standard tools (`wpctl`, `pw-play`, `systemctl`).
 - **Recenter view** calls the public OpenVR API `IVRChaperone::ResetZeroPose` for the standing and the seated pose, as the built-in recenter does. It doesn't change the floor height, and the app writes no files for it. A second request within 1 s is ignored.
 - The music controls talk to the player over the session D-Bus (the standard MPRIS interface `org.mpris.MediaPlayer2.Player`, through `libsystemd`'s sd-bus): they read the players' state and call `Play`, `Pause`, `Next` or `Previous`. Each call gives up after 1 s or less, and it runs off the main loop.
+- The eye actions run `frameeyeosc-panel --action recenter`, `--action fit` or `--action relearn`, which asks the running frameeyeosc panel (it never starts the panel). Its exit code picks the sound and the notice; if a fit is already running (exit code 6), `--action stop` stops it. The app doesn't touch frameeyeosc's files. It runs off the main loop and waits up to 3 s for the answer (when it stops a fit, up to 3 s more for `--action stop`). Whether the panel supports `--action` is checked by running `frameeyeosc-panel --action bogus`: a panel that supports it answers exit code 1 and "unknown action" before it connects to anything, so nothing reaches the running panel. That check and the version (`--version`, only to show "now 0.7.9") run again only when the program file changes.
 - For VRChat mute, the app reads from `/proc` which PC the Steam Link client (`vrlink`) is connected to over UDP (read only), then runs `frame-aux-shortcuts --send-osc auto:9000 /input/Voice`: it sends 1, then 0 after 0.15 s.
 - It never writes to sysfs, GPIO, `/persist`, `/opt`, `/etc` or Steam's files, never touches the cameras, and never restarts PipeWire or SteamVR.
 

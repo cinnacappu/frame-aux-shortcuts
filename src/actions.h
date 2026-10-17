@@ -17,10 +17,11 @@ struct ActionOutcome {
     bool ok = false;
     std::string value;   ///< 結果の値: "muted" / "unmuted"、明るさの %、"on" / "off"、"shown" / "hidden"、保存したファイル、
                          ///< コマンドの名前、組み込みの OSC の送信なら "osc:<アドレス>"、音楽の操作なら "playing" / "paused" /
-                         ///< "next" / "previous"（media.h）、視点のリセットなら "recentered" / "repeated"（recenter.h）
+                         ///< "next" / "previous"（media.h）、視点のリセットなら "recentered" / "repeated"（recenter.h）、
+                         ///< 目のアクションなら "recentering" / "fitting" / "stopped"（eye_actions.h）
     std::string reason;  ///< 失敗の理由のコード: "no_steamvr" / "room_view_api" / "no_command" / "app_missing" / "app_stopped" /
                          ///< "no_pc"（OSC の送り先の PC が見つからない）/ "no_player" / "media_unsupported" /
-                         ///< "not_worn" / "not_tracking"（視点のリセット）/ "failed"
+                         ///< "not_worn" / "not_tracking"（視点のリセット）/ 目のアクションの "eye_…"（eye_actions.h）/ "failed"
     std::string detail;  ///< ログ用の説明
     std::string track;   ///< 音楽の操作のとき、曲名（分かれば。視界のお知らせの 2 行目に出す。ログには書かない）
 };

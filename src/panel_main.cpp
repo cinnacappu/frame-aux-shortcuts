@@ -8,6 +8,7 @@
 #include "config.h"
 #include "dashboard_overlay.h"
 #include "draw.h"
+#include "eye_actions.h"
 #include "frame_apps.h"  // vendor/frame-apps/cpp
 #include "i18n.h"
 #include "osc.h"
@@ -82,7 +83,7 @@ struct Options {
     int previewCommands = -1;    ///< 見本のコマンドをこの数だけ入れる（-1 なら設定ファイルのまま）
     bool previewFolder = false;  ///< 見本のフォルダのコマンドを 2 つ入れる
     int previewAssignCommand = 0;  ///< 5 回押しにこの番号の見本のコマンドを割り当てる（0 なら割り当てない）
-    std::string previewPicker;   ///< 割り当ての列の側（actions / media / commands:<ページ>）。空なら選んだカードに合わせる
+    std::string previewPicker;   ///< 割り当ての列の側（actions / media / eye / commands:<ページ>）。空なら選んだカードに合わせる
     std::string previewSheet;    ///< シート（add / edit / invalid / quote / tested / failed）
     std::string previewDelete;   ///< 「消す」の 2 回目を待つコマンドの id
     std::string previewTested;   ///< 一覧で［試す］を押したコマンドの id（:fail で失敗）
@@ -98,6 +99,9 @@ struct Options {
     bool previewTaps = false;    ///< タップに見本の割り当て（2 回 = パススルー・3 回 = スクリーンショット）を入れ、最後を 2 回タップにする
     bool previewMedia = false;   ///< 音楽の操作の見本の割り当て（1 回押し = 再生・一時停止、4 回押し = 次の曲、2 回タップ = 前の曲）
     bool previewRecenter = false;  ///< 視点のリセットの見本の割り当て（長押し・2 回タップ）。さっきの押し方を長押しにする
+    bool previewEye = false;     ///< 目のアクションの見本の割り当て（1 回押し = 目の正面合わせ、長押し = 目のフィット、
+                                 ///< 2 回タップ = 普段の目を覚え直す）
+    std::string previewEyeState = "ready";  ///< frameeyeosc-panel の状態（ready / missing / outdated / outdated-noversion）
     bool keyboardBuffered = false;  ///< SteamVR のキーボードを今までの方式（Minimal でない）で開く
 };
 
@@ -174,11 +178,14 @@ void printUsage() {
         "      --preview-media        音楽の操作の見本の割り当て（1 回押し = 再生・一時停止、4 回押し = 次の曲、\n"
         "                             2 回タップ = 前の曲）を入れる\n"
         "      --preview-recenter     視点のリセットを長押しと 2 回タップに割り当て、さっきの押し方を長押しにする\n"
+        "      --preview-eye          目の正面合わせを 1 回押し、目のフィットを長押し、覚え直しを 2 回タップに割り当て、\n"
+        "                             さっきの押し方を長押しにする\n"
+        "      --preview-eye-state S  frameeyeosc-panel（ready / missing / outdated / outdated-noversion）\n"
         "      --preview-bg-off       「パネルを閉じても aux を使う」をオフとして描く\n"
         "      --preview-quit / --preview-reset  確認の 2 回目を待っている状態で描く\n"
         "      --preview-commands N   見本のコマンドを N 個にする（--preview-folder でフォルダの分を 2 つ足す）\n"
         "      --preview-assign-command K  5 回押しに見本の K 番目のコマンドを割り当てる\n"
-        "      --preview-picker S     割り当ての列（actions / media / commands:<ページ（0 から）>）\n"
+        "      --preview-picker S     割り当ての列（actions / media / eye / commands:<ページ（0 から）>）\n"
         "      --preview-sheet S      コマンドのシート（add / edit / invalid / quote / tested / failed /\n"
         "                             presets / presets-nopc / presets-manual / presets-badip / presets-sent /\n"
         "                             presets-speaker）\n"
@@ -227,6 +234,10 @@ bool parseOptions(int argc, char** argv, Options& options) {
             options.previewMedia = true;
         } else if (arg == "--preview-recenter") {
             options.previewRecenter = true;
+        } else if (arg == "--preview-eye") {
+            options.previewEye = true;
+        } else if (arg == "--preview-eye-state" && hasNext) {
+            options.previewEyeState = argv[++i];
         } else if (arg == "--language" && hasNext) {
             options.language = argv[++i];
         } else if (arg == "--preview-update" && hasNext) {
@@ -451,6 +462,24 @@ int runDumpPng(const Options& options) {
         s.lastPress.action = ActionType::MediaPlayPause;
         s.lastPress.value = "paused";
     }
+    if (options.previewEye) {
+        config.press[0].type = ActionType::EyeRecenter;
+        config.longPress.type = ActionType::EyeFit;
+        config.tap[0].type = ActionType::EyeRelearn;
+        s.lastPress.kind = PressRecord::Kind::Long;
+        s.lastPress.count = 0;
+        s.lastPress.action = ActionType::EyeFit;
+        s.lastPress.value = kEyeFitting;
+    }
+    {
+        // frameeyeosc-panel: 見本の状態（既定は使える版）
+        const std::string& e = options.previewEyeState;
+        view.eyePanel.state = e == "missing"                                  ? EyePanelState::Missing
+                              : e == "outdated" || e == "outdated-noversion" ? EyePanelState::Outdated
+                                                                              : EyePanelState::Ready;
+        if (view.eyePanel.state != EyePanelState::Missing) view.eyePanel.path = "/home/steamos/.local/bin/frameeyeosc-panel";
+        if (e == "outdated") view.eyePanel.version = "0.7.9";
+    }
     if (options.previewRecenter) {
         config.longPress.type = ActionType::Recenter;
         config.tap[0].type = ActionType::Recenter;
@@ -521,6 +550,7 @@ int runDumpPng(const Options& options) {
     }
     if (options.previewPicker == "actions") panel.setPickerForPreview(SettingsPanel::PickerSide::Actions, 0);
     if (options.previewPicker == "media") panel.setPickerForPreview(SettingsPanel::PickerSide::Media, 0);
+    if (options.previewPicker == "eye") panel.setPickerForPreview(SettingsPanel::PickerSide::Eye, 0);
     if (options.previewPicker.rfind("commands", 0) == 0) {
         const size_t colon = options.previewPicker.find(':');
         panel.setPickerForPreview(SettingsPanel::PickerSide::Commands, colon == std::string::npos ? 0 : std::atoi(options.previewPicker.c_str() + colon + 1));
@@ -894,6 +924,9 @@ int runPanel(const Options& options) {
     if (apps.fetchIfDue()) std::fprintf(stderr, "[アプリ] サイトから一覧を取りに行きます\n");
     bool appsListWasOpen = false;
     std::string lastAppsError;
+    // 目のアクションが使えるか（frameeyeosc-panel の有無と版）。--action bogus と --version を待つので別のスレッドで確かめる
+    EyePanelWatcher eyeWatcher;
+    eyeWatcher.start();
     DashboardOverlay vr;
     // キーボードの方式: 既定は Minimal（1 文字ずつ組み立てる）。--keyboard-buffered か
     // FRAME_AUX_KEYBOARD=buffered で今までの方式（実機で比べるため）
@@ -965,6 +998,9 @@ int runPanel(const Options& options) {
                 dirty = true;
             }
             dirty |= readDaemonState(view, lastStatusKey);
+            // frameeyeosc-panel が入っているか・版（実行ファイルが変わったときだけ --version を起動する。結果は次から受け取る）
+            eyeWatcher.request();
+            if (eyeWatcher.take(view.eyePanel)) dirty = true;
             // コマンドのフォルダの実行ファイル（増減に追いつく）
             std::vector<CommandDef> folder = scanCommandFolder(config.commandFolder);
             if (!(folder == view.folderCommands)) {

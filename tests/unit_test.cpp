@@ -2,10 +2,11 @@
 // 押し方の判定・明るさの計算・設定の読み書きと version 1 からの移行・状態ファイル・外部の出力の読み取り・
 // WebSocket のフレーム・スクリーンショットの保存先・文言・視界のお知らせ・設定パネルの操作と当たり判定・
 // カーソルの判定（aux を SteamVR に返すか）・ヘッドセットのタップの判定・音楽の操作のアプリの選び方・
-// 視点のリセットの判断を確かめる。
+// 視点のリセットの判断・目のアクション（frameeyeosc-panel の終了コードの読み方とフィットの切り替え）を確かめる。
 #include "brightness.h"
 #include "config.h"
 #include "draw.h"
+#include "eye_actions.h"
 #include "head_pointer.h"
 #include "hud_message.h"
 #include "i18n.h"
@@ -29,6 +30,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -385,7 +387,7 @@ void testConfig() {
                 return false;
             }
         }
-        return actionSpecs().size() == 13 && actionSpecs().back().type == ActionType::None;
+        return actionSpecs().size() == 16 && actionSpecs().back().type == ActionType::None;
     }());
     {
         // 0.2.1 で足したもの（version は 3 のまま。書いていなければ既定値）
@@ -2186,6 +2188,563 @@ void testRecenter() {
     }
 }
 
+/**
+ * 終了コードだけの実行結果を作る（目のアクションの偽物の frameeyeosc-panel 用）。
+ * @param code 終了コード（0 なら成功）
+ * @param err 標準エラーの 1 行
+ * @return 結果
+ */
+CommandResult exitResult(int code, const std::string& err = "") {
+    CommandResult r;
+    r.status = code == 0 ? CommandResult::Status::Ok : CommandResult::Status::Failed;
+    r.exitCode = code;
+    r.err = err;
+    return r;
+}
+
+/** 目のアクション: 版の確かめ・終了コードの読み方・フィットの切り替え・設定・文言・お知らせ・パネルの目の側。 */
+void testEye() {
+    expect("目: 種類の見分け", isEyeAction(ActionType::EyeRecenter) && isEyeAction(ActionType::EyeFit) &&
+                                 isEyeAction(ActionType::EyeRelearn) &&
+                                 !isEyeAction(ActionType::Recenter) && !isEyeAction(ActionType::MediaNext) &&
+                                 !isEyeAction(ActionType::None));
+    {
+        std::string version;
+        expect("目: --version の出力から版を読む",
+               parseEyePanelVersion("frameeyeosc-panel 0.7.9\n", version) && version == "0.7.9");
+        expect("目: 2 けたの版も読む（0.7.10）",
+               parseEyePanelVersion("frameeyeosc-panel 0.7.10\n", version) && version == "0.7.10");
+        expect("目: 版が無い・形の違う出力は読まない",
+               !parseEyePanelVersion("Usage: frameeyeosc-panel [options]\n", version) &&
+                   !parseEyePanelVersion("frameeyeosc 0.8.0\n", version) && !parseEyePanelVersion("", version));
+        expect("目: 見つからなければ入っていない・対応していなければ更新が必要・対応していれば使える",
+               eyePanelStateFor(false, true) == EyePanelState::Missing &&
+                   eyePanelStateFor(true, false) == EyePanelState::Outdated &&
+                   eyePanelStateFor(true, true) == EyePanelState::Ready);
+        expect("目: --action bogus が 1 と unknown action なら対応している",
+               eyePanelSupportsActions(exitResult(1, "bogus: unknown action (use recenter, fit, stop or open)\n")));
+        expect("目: 0.7.9 のように 2 で「Unknown argument」なら対応していない",
+               !eyePanelSupportsActions(exitResult(2, "Unknown argument: --action\n")));
+        CommandResult timeout;
+        timeout.status = CommandResult::Status::Timeout;
+        CommandResult spawn;
+        spawn.status = CommandResult::Status::SpawnFailed;
+        expect("目: 1 でも unknown action が無い・0 で終わる・時間切れ・起動できないなら対応していない",
+               !eyePanelSupportsActions(exitResult(1, "action: bad arguments\n")) &&
+                   !eyePanelSupportsActions(exitResult(0, "bogus: started\n")) && !eyePanelSupportsActions(timeout) &&
+                   !eyePanelSupportsActions(spawn));
+        expect("目: 確かめるときの引数は --action bogus",
+               eyeProbeArgv("/p") == std::vector<std::string>({"/p", "--action", "bogus"}));
+        const std::vector<std::string> argv = eyeActionArgv("/p", EyeCall::Fit);
+        expect("目: 引数は --action fit",
+               argv == std::vector<std::string>({"/p", "--action", "fit"}) &&
+                   eyeActionArgv("/p", EyeCall::Recenter)[2] == "recenter" && eyeActionArgv("/p", EyeCall::Stop)[2] == "stop");
+    }
+    {
+        // 終了コード → 結果
+        const ActionOutcome accepted = eyeOutcomeFor(EyeCall::Recenter, exitResult(0, "re-center started"));
+        expect("目: 0 は成功（正面合わせを始めた。標準エラーの 1 行はログに）",
+               accepted.ok && accepted.value == kEyeRecentering && accepted.reason.empty() &&
+                   accepted.detail.find("re-center started") != std::string::npos);
+        expect("目: フィットの 0 は fitting", eyeOutcomeFor(EyeCall::Fit, exitResult(0)).value == kEyeFitting);
+        struct Case {
+            int code;
+            const char* reason;
+        };
+        const Case cases[] = {
+            {1, kReasonEyeOutdated},    {2, kReasonEyePanelStopped}, {3, kReasonEyeNoAnswer}, {4, kReasonEyeNotRunning},
+            {5, kReasonEyeNotFitted},   {6, kReasonEyeBusy},         {7, "failed"},           {8, kReasonEyeLocked},
+            {9, kReasonNotWorn},        {10, kReasonEyeRecenterBusy}, {11, kReasonEyeNoCameras}, {42, "failed"},
+        };
+        bool all = true;
+        for (const Case& c : cases) {
+            const ActionOutcome out = eyeOutcomeFor(EyeCall::Recenter, exitResult(c.code, "panel said"));
+            all = all && !out.ok && out.reason == c.reason && out.value.empty() &&
+                  out.detail.find("終了コード " + std::to_string(c.code)) != std::string::npos &&
+                  out.detail.find("panel said") != std::string::npos;
+        }
+        expect("目: 終了コード 1〜11・ほかを理由のコードにする（説明に終了コードと標準エラー）", all);
+        expect("目: 読み方の表: フィットを止めるのは 6 だけ（10 は止めない）・止めたことにするのは 7 だけ・0 と 12 は表に無い",
+               findEyeExitRule(6) != nullptr && findEyeExitRule(6)->stopsFit && !findEyeExitRule(4)->stopsFit &&
+                   !findEyeExitRule(8)->stopsFit && !findEyeExitRule(10)->stopsFit && !findEyeExitRule(9)->stopsFit &&
+                   findEyeExitRule(7)->okForStop && !findEyeExitRule(6)->okForStop && findEyeExitRule(0) == nullptr &&
+                   findEyeExitRule(12) == nullptr && findEyeExitRule(42) == nullptr && !findEyeExitRule(11)->stopsFit &&
+                   findEyeExitRule(127) == nullptr);
+        expect("目: 表に無いコード（12 など）は「うまくいきませんでした」",
+               reasonText(Language::Ja, eyeOutcomeFor(EyeCall::Fit, exitResult(12)).reason) == "うまくいきませんでした" &&
+                   reasonText(Language::En, eyeOutcomeFor(EyeCall::Recenter, exitResult(99)).reason) == "Something went wrong");
+        CommandResult timeout;
+        timeout.status = CommandResult::Status::Timeout;
+        CommandResult spawn;
+        spawn.status = CommandResult::Status::SpawnFailed;
+        CommandResult signal;
+        signal.status = CommandResult::Status::Failed;
+        signal.exitCode = -1;
+        expect("目: 時間切れは答えなし・起動できない（exec の失敗。127 も runCommand がこれにする）は入っていない・シグナルは失敗",
+               eyeOutcomeFor(EyeCall::Fit, timeout).reason == kReasonEyeNoAnswer &&
+                   eyeOutcomeFor(EyeCall::Fit, spawn).reason == kReasonEyeMissing &&
+                   eyeOutcomeFor(EyeCall::Stop, spawn).reason == kReasonEyeMissing &&
+                   eyeOutcomeFor(EyeCall::Fit, signal).reason == "failed");
+        const ActionOutcome stopped = eyeOutcomeFor(EyeCall::Stop, exitResult(0));
+        const ActionOutcome already = eyeOutcomeFor(EyeCall::Stop, exitResult(7));
+        const ActionOutcome stopFailed = eyeOutcomeFor(EyeCall::Stop, exitResult(3));
+        expect("目: 止めるのは 0 も 7（もう終わっていた）も成功、失敗でも値は stopped",
+               stopped.ok && stopped.value == kEyeStopped && already.ok && already.value == kEyeStopped &&
+                   !stopFailed.ok && stopFailed.value == kEyeStopped && stopFailed.reason == kReasonEyeNoAnswer);
+    }
+    {
+        // 動かし方（偽物の frameeyeosc-panel）
+        std::vector<std::string> calls;
+        std::vector<int> codes;
+        size_t next = 0;
+        constexpr int kTimedOut = -100;  // codes にこれを入れると、その回は時間切れ
+        const EyeRunner fake = [&](const std::vector<std::string>& argv, int timeoutMs) {
+            calls.push_back(argv.size() == 3 && argv[0] == "/eye" && argv[1] == "--action" && timeoutMs == kEyeActionTimeoutMs
+                                ? argv[2]
+                                : "?");
+            const int code = next < codes.size() ? codes[next++] : 0;
+            if (code != kTimedOut) return exitResult(code);
+            CommandResult timedOut;
+            timedOut.status = CommandResult::Status::Timeout;
+            return timedOut;
+        };
+        const auto run = [&](ActionType type, const EyePanelInfo& info, std::vector<int> exits) {
+            calls.clear();
+            codes = exits;
+            next = 0;
+            return runEyeAction(type, info, fake);
+        };
+        EyePanelInfo ready;
+        ready.state = EyePanelState::Ready;
+        ready.path = "/eye";
+        ready.version = "0.8.0";
+        EyePanelInfo missing;
+        missing.state = EyePanelState::Missing;
+        EyePanelInfo outdated = ready;
+        outdated.state = EyePanelState::Outdated;
+        outdated.version = "0.7.9";
+        ActionOutcome out = run(ActionType::EyeFit, missing, {0});
+        expect("目: 入っていなければ頼まずに失敗", !out.ok && out.reason == kReasonEyeMissing && calls.empty());
+        out = run(ActionType::EyeRecenter, outdated, {0});
+        expect("目: --action に対応していなければ頼まずに更新が必要（説明に今の版）",
+               !out.ok && out.reason == kReasonEyeOutdated && calls.empty() &&
+                   out.detail.find("0.7.9") != std::string::npos);
+        out = run(ActionType::EyeRecenter, ready, {0});
+        expect("目: 正面合わせを頼む", out.ok && out.value == kEyeRecentering && calls == std::vector<std::string>({"recenter"}));
+        out = run(ActionType::EyeRecenter, ready, {6});
+        expect("目: 正面合わせでフィット中（6）は止めずに失敗",
+               !out.ok && out.reason == kReasonEyeBusy && calls == std::vector<std::string>({"recenter"}));
+        out = run(ActionType::EyeRecenter, ready, {5});
+        expect("目: 正面合わせでフィットをまだしていない（5）",
+               !out.ok && out.reason == kReasonEyeNotFitted && calls.size() == 1);
+        out = run(ActionType::EyeFit, ready, {0});
+        expect("目: フィットを頼む", out.ok && out.value == kEyeFitting && calls == std::vector<std::string>({"fit"}));
+        out = run(ActionType::EyeFit, ready, {6, 0});
+        expect("目: フィットの途中（6）なら止める（切り替え）",
+               out.ok && out.value == kEyeStopped && calls == std::vector<std::string>({"fit", "stop"}) &&
+                   out.detail.find("止めます") != std::string::npos);
+        out = run(ActionType::EyeFit, ready, {6, 7});
+        expect("目: 止める前に終わっていた（7）も止めたことにする",
+               out.ok && out.value == kEyeStopped && calls.size() == 2);
+        out = run(ActionType::EyeFit, ready, {6, 2});
+        expect("目: 止められなければ失敗（値は stopped で、お知らせは「止められません」）",
+               !out.ok && out.value == kEyeStopped && out.reason == kReasonEyePanelStopped && calls.size() == 2);
+        out = run(ActionType::EyeFit, ready, {kTimedOut});
+        expect("目: フィットが時間切れなら止めずに答えなし",
+               !out.ok && out.reason == kReasonEyeNoAnswer && out.value.empty() && calls == std::vector<std::string>({"fit"}));
+        out = run(ActionType::EyeFit, ready, {4});
+        expect("目: フィットで frameeyeosc が動いていない（4）は止めない",
+               !out.ok && out.reason == kReasonEyeNotRunning && out.value.empty() && calls.size() == 1);
+        out = run(ActionType::EyeFit, ready, {9});
+        expect("目: フィットで目のデータが来ない（9）は、かぶっている間だけ",
+               !out.ok && out.reason == kReasonNotWorn && calls.size() == 1);
+        out = run(ActionType::EyeFit, ready, {10});
+        expect("目: フィットで正面合わせの途中（10）は止めずに失敗",
+               !out.ok && out.reason == kReasonEyeRecenterBusy && out.value.empty() &&
+                   calls == std::vector<std::string>({"fit"}));
+        out = run(ActionType::EyeRecenter, ready, {10});
+        expect("目: 正面合わせで正面合わせの途中（10）", !out.ok && out.reason == kReasonEyeRecenterBusy && calls.size() == 1);
+        out = run(ActionType::EyeRecenter, ready, {9});
+        expect("目: 正面合わせで目のデータが来ない（9）", !out.ok && out.reason == kReasonNotWorn && calls.size() == 1);
+        out = run(ActionType::EyeRelearn, ready, {0});
+        expect("目: 覚え直しを頼む", out.ok && out.value == kEyeRelearning && calls == std::vector<std::string>({"relearn"}));
+        out = run(ActionType::EyeRelearn, ready, {6});
+        expect("目: 覚え直しでフィット中（6）は止めずに失敗（切り替えではない）",
+               !out.ok && out.reason == kReasonEyeBusy && calls == std::vector<std::string>({"relearn"}));
+        out = run(ActionType::EyeRelearn, ready, {9});
+        expect("目: 覚え直しで目のデータが来ない（9）", !out.ok && out.reason == kReasonNotWorn && calls.size() == 1);
+        out = run(ActionType::EyeRelearn, ready, {11});
+        expect("目: 覚え直しで目のカメラが使えない（11）", !out.ok && out.reason == kReasonEyeNoCameras && calls.size() == 1);
+        out = run(ActionType::EyeRelearn, outdated, {0});
+        expect("目: 対応していない版には覚え直しも頼まない", !out.ok && out.reason == kReasonEyeOutdated && calls.empty());
+        expect("目: 11 のわけを標準エラーから読む（校正中・映像が無い・ほかはそのまま）",
+               eyeOutcomeFor(EyeCall::Relearn, exitResult(11, "relearn: eye cameras not ready (calibrating)\n")).reason ==
+                       kReasonEyeCamerasCalibrating &&
+                   eyeOutcomeFor(EyeCall::Relearn, exitResult(11, "relearn: eye cameras not ready (no eye video)\n")).reason ==
+                       kReasonEyeCamerasNoVideo &&
+                   eyeOutcomeFor(EyeCall::Relearn,
+                                 exitResult(11, "relearn: eye cameras not in use or not ready (see the panel's Eye cameras tab)\n"))
+                           .reason == kReasonEyeNoCameras &&
+                   eyeOutcomeFor(EyeCall::Relearn, exitResult(2, "relearn: calibrating\n")).reason == kReasonEyePanelStopped);
+        expect("目: 覚え直しの引数は --action relearn", eyeActionArgv("/p", EyeCall::Relearn)[2] == "relearn");
+        out = run(ActionType::EyeFit, ready, {8});
+        expect("目: フィットの値がコマンドラインで固定（8）は止めずに失敗",
+               !out.ok && out.reason == kReasonEyeLocked && out.value.empty() && calls == std::vector<std::string>({"fit"}));
+        out = run(ActionType::EyeRecenter, ready, {8});
+        expect("目: 正面合わせでも固定（8）は失敗", !out.ok && out.reason == kReasonEyeLocked && calls.size() == 1);
+        EyePanelInfo unknownVersion = ready;
+        unknownVersion.version.clear();
+        out = run(ActionType::EyeFit, unknownVersion, {0});
+        expect("目: 版が読めなくても頼んでみる", out.ok && calls.size() == 1);
+        out = run(ActionType::Recenter, ready, {0});
+        expect("目: 目のアクションでなければ頼まない", !out.ok && calls.empty());
+    }
+    {
+        // frameeyeosc-panel を確かめる係: HOME と PATH を一時フォルダにして、偽物のスクリプトで
+        char base[] = "/tmp/fas-eye-test-XXXXXX";
+        const bool made = mkdtemp(base) != nullptr;
+        const std::string root = made ? base : "/tmp";
+        const std::string bin = root + "/.local/bin";
+        const std::string script = bin + "/frameeyeosc-panel";
+        const std::string log = root + "/calls.log";
+        // --action に対応した版は bogus を 1 と "unknown action" ではね、古い版は 0.7.9 と同じく 2 と "Unknown argument"
+        const auto writeScript = [&](const std::string& version, bool supports) {
+            std::string error;
+            const std::string action = supports ? "echo \"$2: unknown action (use recenter, fit, stop or open)\" >&2; exit 1"
+                                                : "echo \"Unknown argument: $1\" >&2; exit 2";
+            writeFilePrivately(script,
+                               "#!/bin/sh\necho \"$*\" >> " + log + "\nif [ \"$1\" = --action ]; then " + action +
+                                   "; fi\necho \"frameeyeosc-panel " + version + "\"\n",
+                               error);
+            ::chmod(script.c_str(), 0700);
+        };
+        const auto calls = [&]() {
+            std::string text;
+            readTextFile(log, text);
+            return text;
+        };
+        const auto callCount = [&]() {
+            std::string text;
+            readTextFile(log, text);
+            return static_cast<int>(std::count(text.begin(), text.end(), '\n'));
+        };
+        const char* oldHome = std::getenv("HOME");
+        const std::string savedHome = oldHome != nullptr ? oldHome : "";
+        const char* oldPath = std::getenv("PATH");
+        const std::string savedPath = oldPath != nullptr ? oldPath : "";
+        ::setenv("HOME", root.c_str(), 1);
+        ::setenv("PATH", (root + "/nowhere").c_str(), 1);
+        EyePanelProbe probe;
+        const bool missingFirst = probe.refresh() && probe.info().state == EyePanelState::Missing;
+        ::mkdir((root + "/.local").c_str(), 0700);
+        ::mkdir(bin.c_str(), 0700);
+        writeScript("0.7.9", false);
+        const bool outdated = probe.refresh() && probe.info().state == EyePanelState::Outdated &&
+                              probe.info().version == "0.7.9" && probe.info().path == script &&
+                              calls() == "--action bogus\n--version\n";
+        const bool cached = !probe.refresh() && !probe.refresh() && callCount() == 2;
+        ::usleep(20 * 1000);  // 更新時刻が変わるように
+        writeScript("0.7.9", true);
+        const bool updated = probe.refresh() && probe.info().state == EyePanelState::Ready && probe.info().version == "0.7.9" &&
+                             callCount() == 4;
+        ::unlink(script.c_str());
+        const bool removed = probe.refresh() && probe.info().state == EyePanelState::Missing && probe.info().path.empty();
+        if (oldHome != nullptr) ::setenv("HOME", savedHome.c_str(), 1);
+        if (oldPath != nullptr) ::setenv("PATH", savedPath.c_str(), 1);
+        ::unlink(log.c_str());
+        ::rmdir(bin.c_str());
+        ::rmdir((root + "/.local").c_str());
+        if (made) ::rmdir(root.c_str());
+        expect("目: 入っていなければ Missing（~/.local/bin と PATH を探す）", made && missingFirst);
+        expect("目: 見つかったら --action bogus で確かめ、--version で版を読む（2 で終わる版は更新が必要）", outdated);
+        expect("目: 実行ファイルが変わらなければ起動し直さない", cached);
+        expect("目: 実行ファイルが変わったら確かめ直す（版が 0.7.9 のままでも、--action に対応していれば使える）", updated);
+        expect("目: 消えたら Missing に戻る", removed);
+    }
+    {
+        // 確かめが答えなかったとき: 覚えず、少しあとの refresh で起動し直す（偽物の係と時計で）
+        char base[] = "/tmp/fas-eye-retry-XXXXXX";
+        const bool made = mkdtemp(base) != nullptr;
+        const std::string root = made ? base : "/tmp";
+        const std::string bin = root + "/.local/bin";
+        const std::string script = bin + "/frameeyeosc-panel";
+        ::mkdir((root + "/.local").c_str(), 0700);
+        ::mkdir(bin.c_str(), 0700);
+        std::string error;
+        writeFilePrivately(script, "#!/bin/sh\nexit 0\n", error);  // 起動はしない（見つかって stat できればよい）
+        ::chmod(script.c_str(), 0700);
+        const char* oldHome = std::getenv("HOME");
+        const std::string savedHome = oldHome != nullptr ? oldHome : "";
+        const char* oldPath = std::getenv("PATH");
+        const std::string savedPath = oldPath != nullptr ? oldPath : "";
+        ::setenv("HOME", root.c_str(), 1);
+        ::setenv("PATH", (root + "/nowhere").c_str(), 1);
+        CommandResult::Status probeStatus = CommandResult::Status::Timeout;
+        int probes = 0;
+        long long nowMs = 1000;
+        const EyeRunner fake = [&](const std::vector<std::string>& argv, int /*timeoutMs*/) {
+            if (argv.size() == 2 && argv[1] == "--version") {
+                CommandResult r = exitResult(0);
+                r.out = "frameeyeosc-panel 0.7.10\n";
+                return r;
+            }
+            ++probes;
+            if (probeStatus == CommandResult::Status::Failed) return exitResult(1, "bogus: unknown action (use recenter)\n");
+            CommandResult r;
+            r.status = probeStatus;
+            return r;
+        };
+        EyePanelProbe probe(fake, [&] { return nowMs; });
+        // 時間切れ: Unknown のまま（使えるかもしれないので頼んではみる）。すぐの refresh では起動しない
+        const bool timedOut = probe.refresh() && probe.info().state == EyePanelState::Unknown && probe.info().path == script &&
+                              probes == 1 && !probe.refresh() && probes == 1;
+        nowMs += kEyeProbeRetryMs - 1;
+        const bool waits = !probe.refresh() && probes == 1;
+        nowMs += 1;
+        probeStatus = CommandResult::Status::SpawnFailed;
+        // 間をおいたら起動し直す。起動できなければ入っていない側（Missing）
+        const bool retried = probe.refresh() && probes == 2 && probe.info().state == EyePanelState::Missing &&
+                             probe.info().path.empty();
+        nowMs += kEyeProbeRetryMs;
+        probeStatus = CommandResult::Status::Failed;
+        // 答えが返ったら覚える（もう起動しない）
+        const bool ready = probe.refresh() && probes == 3 && probe.info().state == EyePanelState::Ready &&
+                           probe.info().version == "0.7.10" && !probe.refresh() && probes == 3;
+        if (oldHome != nullptr) ::setenv("HOME", savedHome.c_str(), 1);
+        if (oldPath != nullptr) ::setenv("PATH", savedPath.c_str(), 1);
+        ::unlink(script.c_str());
+        ::rmdir(bin.c_str());
+        ::rmdir((root + "/.local").c_str());
+        if (made) ::rmdir(root.c_str());
+        expect("目: 確かめが時間切れなら覚えず Unknown、すぐには起動し直さない", made && timedOut);
+        expect("目: 確かめ直すのは間をおいてから", waits);
+        expect("目: 時間切れのあと、次の refresh でもう一度起動する（起動できなければ Missing）", retried);
+        expect("目: 答えが返ったら覚えて、もう起動しない", ready);
+    }
+    {
+        // 設定ファイル: 2 つの種類を読み書きできる（version は 3 のまま）
+        Config config;
+        std::vector<std::string> warnings;
+        std::string error;
+        const bool ok = parseConfigText(R"({ "version": 3, "actions": { "press_1": "eye_recenter",
+                                             "long_press": { "type": "eye_fit" }, "tap_3": { "type": "eye_fit" },
+                                             "tap_2": "eye_relearn" } })",
+                                        config, warnings, error);
+        expect("設定: eye_recenter / eye_fit / eye_relearn を読める・知らせなし",
+               ok && warnings.empty() && config.press[0].type == ActionType::EyeRecenter &&
+                   config.longPress.type == ActionType::EyeFit && config.tap[1].type == ActionType::EyeFit &&
+                   config.tap[0].type == ActionType::EyeRelearn);
+        const std::string json = configToJson(config);
+        Config again;
+        expect("設定: 目のアクションを書いて読み直すと同じ・version は 3",
+               parseConfigText(json, again, warnings, error) && configToJson(again) == json &&
+                   json.find("\"press_1\": { \"type\": \"eye_recenter\" }") != std::string::npos &&
+                   json.find("\"long_press\": { \"type\": \"eye_fit\" }") != std::string::npos &&
+                   json.find("\"tap_2\": { \"type\": \"eye_relearn\" }") != std::string::npos &&
+                   json.find("\"version\": 3") != std::string::npos);
+        expect("設定: 目のアクションに SteamVR は要らない（--test-action でつながない）",
+               !actionSpec(ActionType::EyeRecenter).needsVr && !actionSpec(ActionType::EyeFit).needsVr &&
+                   !actionSpec(ActionType::EyeRelearn).needsVr);
+        ActionType type = ActionType::None;
+        expect("設定: --test-action の名前", parseActionType("eye_recenter", type) && type == ActionType::EyeRecenter &&
+                                                 parseActionType("eye_fit", type) && type == ActionType::EyeFit &&
+                                                 std::string(actionTypeName(ActionType::EyeFit)) == "eye_fit" &&
+                                                 parseActionType("eye_relearn", type) && type == ActionType::EyeRelearn);
+        Config future;
+        parseConfigText(R"({ "version": 3, "actions": { "press_1": "eye_something_new" } })", future, warnings, error);
+        expect("設定: 知らない目の種類は知らせて、既定の割り当てのまま",
+               !warnings.empty() && future.press[0].type == Config().press[0].type);
+    }
+    expect("文言: 目のアクションの名前・カードの 2 行目（日英）",
+           std::string(actionLabel(Language::Ja, ActionType::EyeRecenter)) == "目の正面合わせ" &&
+               std::string(actionLabel(Language::Ja, ActionType::EyeFit)) == "目のフィット" &&
+               std::string(actionLabel(Language::En, ActionType::EyeRecenter)) == "Recenter eyes" &&
+               std::string(actionLabel(Language::En, ActionType::EyeFit)) == "Eye fit" &&
+               std::string(actionLabel(Language::Ja, ActionType::EyeRelearn)) == "普段の目を覚え直す" &&
+               std::string(actionLabel(Language::En, ActionType::EyeRelearn)) == "Relearn my eyes" &&
+               std::string(uiText(Language::Ja).stEyeRelearn) == "普段の目を約 30 秒で覚え直します" &&
+               std::string(uiText(Language::Ja).pickerEye) == "目" && std::string(uiText(Language::En).pickerEye) == "Eyes");
+    expect("文言: 目のアクションのアイコン",
+           iconForAction(ActionType::EyeRecenter) == Icon::EyeRecenter && iconForAction(ActionType::EyeFit) == Icon::EyeFit &&
+               iconForAction(ActionType::EyeRelearn) == Icon::EyeRelearn);
+    {
+        PressRecord press;
+        press.kind = PressRecord::Kind::Tap;
+        press.count = 2;
+        press.action = ActionType::EyeRelearn;
+        press.ok = true;
+        press.value = kEyeRelearning;
+        HudToast toast;
+        expect("お知らせ: 覚え直しは始めたときにも出す（点を見る必要が無い・約 30 秒）",
+               makeHudToast(press, Language::Ja, toast) && !toast.error && toast.title == "普段の目を覚え直しています" &&
+                   toast.sub == "2 回タップ・約 30 秒" && toast.icon == Icon::EyeRelearn &&
+                   makeHudToast(press, Language::En, toast) && toast.title == "Relearning your eyes" &&
+                   toast.sub == "Double tap · About 30 s");
+        press.ok = false;
+        press.value.clear();
+        press.reason = kReasonEyeNoCameras;
+        expect("お知らせ: 覚え直しで目のカメラが使えない",
+               makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "普段の目を覚え直せません" &&
+                   toast.sub == "2 回タップ・目のカメラが使えません" && makeHudToast(press, Language::En, toast) &&
+                   toast.title == "Couldn't relearn your eyes" && toast.sub == "Double tap · The eye cameras aren't available");
+        press.reason = kReasonEyeCamerasCalibrating;
+        const bool calibrating = makeHudToast(press, Language::Ja, toast) && toast.sub == "2 回タップ・目のカメラの校正中です";
+        press.reason = kReasonEyeCamerasNoVideo;
+        expect("お知らせ: 覚え直しで校正中・映像が来ていない",
+               calibrating && makeHudToast(press, Language::Ja, toast) && toast.sub == "2 回タップ・目のカメラの映像が来ていません");
+        press.reason = kReasonNotWorn;
+        expect("お知らせ: 覚え直しでかぶっていない",
+               makeHudToast(press, Language::Ja, toast) && toast.sub == "2 回タップ・ヘッドセットをかぶっている間だけ使えます");
+    }
+    {
+        PressRecord press;
+        press.kind = PressRecord::Kind::Long;
+        press.action = ActionType::EyeFit;
+        press.ok = true;
+        press.value = kEyeFitting;
+        HudToast toast;
+        expect("お知らせ: フィットを始めたときは出さない（frameeyeosc の点を見てもらう）",
+               !makeHudToast(press, Language::Ja, toast));
+        press.action = ActionType::EyeRecenter;
+        press.value = kEyeRecentering;
+        expect("お知らせ: 正面合わせを始めたときも出さない", !makeHudToast(press, Language::En, toast));
+        press.action = ActionType::EyeFit;
+        press.value = kEyeStopped;
+        expect("お知らせ: フィットを止めた",
+               makeHudToast(press, Language::Ja, toast) && !toast.error && toast.title == "目のフィットを止めました" &&
+                   toast.sub == "長押し" && toast.icon == Icon::EyeFit);
+        press.ok = false;
+        press.reason = kReasonEyeNoAnswer;
+        expect("お知らせ: 止められなかった（英語）",
+               makeHudToast(press, Language::En, toast) && toast.error && toast.title == "Couldn't stop the eye fit" &&
+                   toast.sub == "Long press · frameeyeosc's panel didn't answer");
+        press.value.clear();
+        press.reason = kReasonEyePanelStopped;
+        expect("お知らせ: フィットを始められない・パネルが動いていない",
+               makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "目のフィットを始められません" &&
+                   toast.sub == "長押し・frameeyeosc のパネルが動いていません");
+        press.kind = PressRecord::Kind::Count;
+        press.count = 1;
+        press.action = ActionType::EyeRecenter;
+        press.reason = kReasonEyeNotFitted;
+        expect("お知らせ: 正面合わせの前にフィットが要る",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "目の正面を合わせられません" &&
+                   toast.sub == "1 回押し・先に目のフィットをしてください");
+        press.reason = kReasonEyeBusy;
+        expect("お知らせ: フィット中", makeHudToast(press, Language::Ja, toast) && toast.sub == "1 回押し・フィット中です");
+        press.reason = kReasonEyeLocked;
+        expect("お知らせ: 正面合わせで、値がコマンドラインで固定（日英）",
+               makeHudToast(press, Language::Ja, toast) && toast.sub == "1 回押し・frameeyeosc のコマンドラインで固定されています" &&
+                   makeHudToast(press, Language::En, toast) && toast.sub == "1 press · Locked by frameeyeosc's command line");
+        press.action = ActionType::EyeFit;
+        expect("お知らせ: フィットで、値がコマンドラインで固定",
+               makeHudToast(press, Language::Ja, toast) && toast.error && toast.title == "目のフィットを始められません" &&
+                   toast.sub == "1 回押し・frameeyeosc のコマンドラインで固定されています");
+        press.action = ActionType::EyeRecenter;
+        press.reason = kReasonEyeRecenterBusy;
+        expect("お知らせ: 正面合わせ中（正面合わせ・フィットとも）",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "目の正面を合わせられません" &&
+                   toast.sub == "1 回押し・正面合わせ中です" && makeHudToast(press, Language::En, toast) &&
+                   toast.sub == "1 press · Recentering is running");
+        press.action = ActionType::EyeFit;
+        expect("お知らせ: フィットで正面合わせ中",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "目のフィットを始められません" &&
+                   toast.sub == "1 回押し・正面合わせ中です");
+        press.reason = kReasonEyeNotRunning;
+        expect("お知らせ: frameeyeosc が動いていない（4）",
+               makeHudToast(press, Language::Ja, toast) && toast.sub == "1 回押し・frameeyeosc が動いていません" &&
+                   makeHudToast(press, Language::En, toast) && toast.sub == "1 press · frameeyeosc isn't running");
+        press.reason = kReasonNotWorn;
+        expect("お知らせ: 目のデータが来ない（9）は、視点のリセットと同じ「かぶっている間だけ」",
+               makeHudToast(press, Language::Ja, toast) && toast.title == "目のフィットを始められません" &&
+                   toast.sub == "1 回押し・ヘッドセットをかぶっている間だけ使えます" &&
+                   makeHudToast(press, Language::En, toast) && toast.sub == "1 press · Works only while you wear the headset");
+        press.action = ActionType::EyeRecenter;
+        bool texts = true;
+        for (const char* reason : {kReasonEyeMissing, kReasonEyeOutdated, kReasonEyeNotRunning}) {
+            for (const Language lang : {Language::Ja, Language::En}) {
+                texts = texts && reasonText(lang, reason) != reasonText(lang, "failed") &&
+                        reasonText(lang, reason).find("frameeyeosc") != std::string::npos;
+            }
+        }
+        expect("お知らせ: 入っていない・更新が必要・動いていないの文言（日英）", texts);
+    }
+    {
+        // 設定パネル: 割り当ての列の「目」の側
+        using K = PanelAction::Kind;
+        Config config;
+        expect("パネル: 目のフィットを割り当てる",
+               applyPanelAction({K::Assign, static_cast<int>(ActionType::EyeFit), 5}, config) &&
+                   config.longPress.type == ActionType::EyeFit && config.longPress.commandId.empty());
+        FontSet fonts;
+        fonts.load("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc");
+        SettingsPanel panel(fonts);
+        PanelView view;
+        view.daemon = PanelView::Daemon::Running;
+        for (const EyePanelState state : {EyePanelState::Ready, EyePanelState::Missing, EyePanelState::Outdated}) {
+            view.eyePanel.state = state;
+            view.eyePanel.version = state == EyePanelState::Outdated ? "0.7.9" : "";
+            for (const Language lang : {Language::Ja, Language::En}) {
+                const std::string tag = std::string("（") + languageCode(lang) + "・" +
+                                        (state == EyePanelState::Ready ? "使える" : state == EyePanelState::Missing ? "入っていない" : "古い") +
+                                        "）";
+                config.language = lang;
+                panel.setTab(PanelTab::Assign);
+                panel.setSelectedSlot(5);
+                panel.render(config, view);
+                double x = 0;
+                double y = 0;
+                double bx = 0;
+                double by = 0;
+                double bw = 0;
+                double bh = 0;
+                bool row = true;
+                double firstY = -1;
+                double lastRight = 0;
+                for (const ActionType type : {ActionType::EyeRecenter, ActionType::EyeFit, ActionType::EyeRelearn}) {
+                    if (!panel.buttonBounds({K::Assign, static_cast<int>(type), 5}, bx, by, bw, bh)) {
+                        row = false;
+                        continue;
+                    }
+                    if (firstY < 0) firstY = by;
+                    row = row && by == firstY && bx >= lastRight && bx + bw <= SettingsPanel::kWidth - 24 &&
+                          by + bh <= SettingsPanel::kHeight - 40;
+                    lastRight = bx + bw;
+                }
+                expect("パネル: 目のアクションを割り当てたカードを選ぶと、目の側の 3 つが 1 段に並ぶ" + tag,
+                       row && !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MicMuteToggle), 5}, x, y) &&
+                           !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MediaNext), 5}, x, y));
+                double segment[4][4] = {};
+                bool segments = true;
+                const K kinds[] = {K::PickerActions, K::PickerMedia, K::PickerEye, K::PickerCommands};
+                for (int i = 0; i < 4; ++i) {
+                    segments = segments && panel.buttonBounds({kinds[i], 0, 0}, segment[i][0], segment[i][1], segment[i][2],
+                                                              segment[i][3]);
+                    if (i > 0) segments = segments && segment[i][0] >= segment[i - 1][0] + segment[i - 1][2];
+                }
+                expect("パネル: ［アクション｜音楽｜目｜コマンド］がこの順に並ぶ" + tag,
+                       segments && segment[3][0] + segment[3][2] <= SettingsPanel::kWidth - 24);
+                panel.buttonCenter({K::PickerActions, 0, 0}, x, y);
+                panel.pointerDown(x, y, 0.0);
+                panel.render(config, view);
+                expect("パネル: アクションの側に目のアクションは入らない" + tag,
+                       panel.buttonCenter({K::Assign, static_cast<int>(ActionType::MicMuteToggle), 5}, x, y) &&
+                           !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::EyeFit), 5}, x, y) &&
+                           !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::EyeRecenter), 5}, x, y) &&
+                           !panel.buttonCenter({K::Assign, static_cast<int>(ActionType::EyeRelearn), 5}, x, y));
+                panel.buttonCenter({K::PickerEye, 0, 0}, x, y);
+                panel.pointerDown(x, y, 1.0);
+                panel.render(config, view);
+                const bool eye = panel.buttonCenter({K::Assign, static_cast<int>(ActionType::EyeRecenter), 5}, x, y);
+                const PanelAction pressed = panel.pointerDown(x, y, 2.0);
+                expect("パネル: 目の側に切り替えて、目の正面合わせを押すと割り当ての操作が返る（使えなくても選べる）" + tag,
+                       eye && pressed == PanelAction({K::Assign, static_cast<int>(ActionType::EyeRecenter), 5}));
+                panel.pointerUp();
+            }
+        }
+    }
+}
+
 int main() {
     testPressDetector();
     testBrightness();
@@ -2203,6 +2762,7 @@ int main() {
     testTaps();
     testMedia();
     testRecenter();
+    testEye();
     std::printf("\n%d 件中 %d 件が合格\n", gTotal, gTotal - gFailures);
     return gFailures == 0 ? 0 : 1;
 }

@@ -4,6 +4,7 @@
 #include "autostart.h"
 #include "commands.h"
 #include "config.h"
+#include "eye_actions.h"
 #include "frame_apps.h"     // vendor/frame-apps/cpp（CMake の include dir で見つかる）
 #include "status.h"
 #include "update_check.h"  // vendor/frame-updater/cpp（CMake の include dir で見つかる）
@@ -85,6 +86,7 @@ struct PanelAction {
         UpdateDismiss,     ///< 呼び出し側で扱う
         PickerActions,     ///< 割り当ての列をアクションの側に（パネルの中だけで扱う）
         PickerMedia,       ///< 割り当ての列を音楽の側に（パネルの中だけで扱う）
+        PickerEye,         ///< 割り当ての列を目の側に（パネルの中だけで扱う）
         PickerCommands,    ///< 割り当ての列をコマンドの側に（パネルの中だけで扱う）
         PickerPrev,        ///< コマンドの側の前のページ（パネルの中だけで扱う）
         PickerNext,        ///< コマンドの側の次のページ（パネルの中だけで扱う）
@@ -153,6 +155,7 @@ struct PanelView {
     std::vector<CommandDef> folderCommands;  ///< コマンドのフォルダの実行ファイル
     std::vector<frame_apps::Entry> apps;     ///< ささけんのアプリ（使うものが先、自分は入っていない）
     bool menuBusy = false;                   ///< メニューの Konsole がまだ開いている
+    EyePanelInfo eyePanel;                   ///< frameeyeosc-panel が入っているか・版（目のアクションが使えるか）
 };
 
 /**
@@ -168,8 +171,8 @@ bool applyPanelAction(const PanelAction& action, Config& config);
  */
 class SettingsPanel {
 public:
-    /** 割り当ての列の側（アクション・音楽・コマンド）。 */
-    enum class PickerSide { Actions, Media, Commands };
+    /** 割り当ての列の側（アクション・音楽・目・コマンド）。 */
+    enum class PickerSide { Actions, Media, Eye, Commands };
     /** 画像の大きさ（px）。 */
     static constexpr int kWidth = 1200;
     static constexpr int kHeight = 740;

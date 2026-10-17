@@ -48,6 +48,26 @@ void micPath(cairo_t* cr) {
     line(cr, 12, 18, 12, 21);
 }
 
+/**
+ * 目の形（パススルーのアイコンと同じ曲線を、真ん中 (cx, cy)・幅 w に縮めたもの）と瞳。
+ * @param cr cairo
+ * @param cx 真ん中の x
+ * @param cy 真ん中の y
+ * @param w 幅（パススルーのアイコンは 20）
+ * @param pupil 瞳の半径
+ */
+void eyePath(cairo_t* cr, double cx, double cy, double w, double pupil) {
+    const double k = w / 20.0;
+    cairo_move_to(cr, cx - 10 * k, cy);
+    cairo_curve_to(cr, cx - 10 * k, cy, cx - 6.4 * k, cy - 7 * k, cx, cy - 7 * k);
+    cairo_curve_to(cr, cx + 6.4 * k, cy - 7 * k, cx + 10 * k, cy, cx + 10 * k, cy);
+    cairo_curve_to(cr, cx + 10 * k, cy, cx + 6.4 * k, cy + 7 * k, cx, cy + 7 * k);
+    cairo_curve_to(cr, cx - 6.4 * k, cy + 7 * k, cx - 10 * k, cy, cx - 10 * k, cy);
+    cairo_close_path(cr);
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, cx, cy, pupil, 0, 2 * M_PI);
+}
+
 }  // namespace
 
 Icon iconForAction(ActionType type, bool muted) {
@@ -63,6 +83,9 @@ Icon iconForAction(ActionType type, bool muted) {
         case ActionType::MediaPlayPause: return Icon::PlayPause;
         case ActionType::MediaNext: return Icon::SkipNext;
         case ActionType::MediaPrevious: return Icon::SkipPrevious;
+        case ActionType::EyeRecenter: return Icon::EyeRecenter;
+        case ActionType::EyeFit: return Icon::EyeFit;
+        case ActionType::EyeRelearn: return Icon::EyeRelearn;
         case ActionType::Command: return Icon::Terminal;
         case ActionType::None: return Icon::NoEntry;
     }
@@ -241,6 +264,46 @@ void drawIcon(cairo_t* cr, Icon icon, double cx, double cy, double size, Color c
             line(cr, 19, 12, 22, 12);
             line(cr, 12, 2, 12, 5);
             line(cr, 12, 19, 12, 22);
+            break;
+        case Icon::EyeRecenter:
+            // Lucide の scan-eye に近い形: 四隅の枠（M3 7V5a2 2 0 0 1 2-2h2 など）＋ 真ん中に小さな目
+            cairo_move_to(cr, 3, 7);
+            cairo_line_to(cr, 3, 5);
+            cairo_arc(cr, 5, 5, 2, M_PI, 3 * M_PI / 2);
+            cairo_line_to(cr, 7, 3);
+            cairo_move_to(cr, 17, 3);
+            cairo_line_to(cr, 19, 3);
+            cairo_arc(cr, 19, 5, 2, 3 * M_PI / 2, 2 * M_PI);
+            cairo_line_to(cr, 21, 7);
+            cairo_move_to(cr, 21, 17);
+            cairo_line_to(cr, 21, 19);
+            cairo_arc(cr, 19, 19, 2, 0, M_PI / 2);
+            cairo_line_to(cr, 17, 21);
+            cairo_move_to(cr, 7, 21);
+            cairo_line_to(cr, 5, 21);
+            cairo_arc(cr, 5, 19, 2, M_PI / 2, M_PI);
+            cairo_line_to(cr, 3, 17);
+            eyePath(cr, 12, 12, 13, 1.6);
+            break;
+        case Icon::EyeFit:
+            // 目（左下に寄せて少し小さく）と、右上に目で追う点（フィットで出る点）
+            eyePath(cr, 10, 14, 16, 2.2);
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, 19.5, 4.5, 2, 0, 2 * M_PI);
+            break;
+        case Icon::EyeRelearn:
+            // Lucide の refresh-cw に近い、回る 2 本の矢印（半径 9 の弧と角の矢じり）の中に小さな目
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, 12, 12, 9, M_PI, 2 * M_PI - M_PI / 6);
+            cairo_move_to(cr, 20.5, 3);
+            cairo_line_to(cr, 20.5, 7.5);
+            cairo_line_to(cr, 16, 7.5);
+            cairo_new_sub_path(cr);
+            cairo_arc(cr, 12, 12, 9, 0, M_PI - M_PI / 6);
+            cairo_move_to(cr, 3.5, 21);
+            cairo_line_to(cr, 3.5, 16.5);
+            cairo_line_to(cr, 8, 16.5);
+            eyePath(cr, 12, 12, 9, 1.3);
             break;
     }
     cairo_stroke(cr);

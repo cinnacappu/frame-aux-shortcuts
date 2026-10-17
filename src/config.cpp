@@ -36,6 +36,9 @@ const std::vector<ActionSpec> kActionSpecs = {
     {ActionType::MediaPlayPause, "media_play_pause", false},
     {ActionType::MediaNext, "media_next", false},
     {ActionType::MediaPrevious, "media_previous", false},
+    {ActionType::EyeRecenter, "eye_recenter", false},
+    {ActionType::EyeFit, "eye_fit", false},
+    {ActionType::EyeRelearn, "eye_relearn", false},
     {ActionType::Command, "command", false},
     {ActionType::None, "none", false},
 };

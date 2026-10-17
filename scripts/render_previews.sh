@@ -77,6 +77,14 @@ for lang in ja en; do
     # 入っていない frame-perf-overlay（選んでいない・選んだ。5 列の幅で名前の下に札）
     shot "panel-$lang-assign-recenter" --language "$lang" --tab assign --preview-recenter --slot 5
     shot "panel-$lang-assign-recenter-perf-missing" --language "$lang" --tab assign --preview-recenter --slot 6 --preview-perf missing
+    # 割り当て: 目のアクション（1 回押し = 正面合わせ・長押し = フィット。長押しのカードを選ぶ）と、
+    # frameeyeosc が入っていない・古い（版が分かる・--version に答えない）、アクションの側
+    shot "panel-$lang-assign-eye" --language "$lang" --tab assign --preview-eye --slot 5
+    shot "panel-$lang-assign-eye-missing" --language "$lang" --tab assign --preview-eye --slot 5 --preview-eye-state missing
+    shot "panel-$lang-assign-eye-outdated" --language "$lang" --tab assign --preview-eye --slot 0 --preview-eye-state outdated
+    shot "panel-$lang-assign-eye-outdated-noversion" --language "$lang" --tab assign --preview-eye --slot 0 \
+        --preview-eye-state outdated-noversion
+    shot "panel-$lang-assign-eye-actions" --language "$lang" --tab assign --preview-eye --slot 5 --preview-picker actions
     # アプリ: 更新の帯の状態（4 つの基本の状態＋確認・更新中・入れた・失敗）と、入っていない・止まっているアプリ
     for state in uptodate checking available checkfailed confirm installing installed installfailed manual; do
         shot "panel-$lang-app-update-$state" --language "$lang" --tab app --preview-update "$state"

@@ -8,7 +8,8 @@ enum class Language { Ja, En };
  * 押し方に割り当てるアクションの種類。
  * 種類を足すときは、ここ・config.cpp の kActionSpecs・i18n.cpp の actionLabel・icons.cpp の iconForAction・
  * hud_message.cpp・actions.cpp の prepareAction に 1 行ずつ足す（設定パネルの選択肢は kActionSpecs の順に並ぶ。
- * 音楽の操作は media.h の isMediaAction にも足す。パネルでは「音楽」の側に並ぶ）。
+ * 音楽の操作は media.h の isMediaAction にも足す。パネルでは「音楽」の側に並ぶ。目のアクションは eye_actions.h の
+ * isEyeAction。パネルでは「目」の側に並ぶ）。
  * 設定ファイル・状態ファイルには名前（kActionSpecs）で書くので、ここの並びの数は外に出ない。
  */
 enum class ActionType {
@@ -24,5 +25,8 @@ enum class ActionType {
     MediaPlayPause,     ///< Frame で流している音楽・動画の再生・一時停止（MPRIS。media_control.h）
     MediaNext,          ///< 次の曲（MPRIS の Next）
     MediaPrevious,      ///< 前の曲（MPRIS の Previous）
+    EyeRecenter,        ///< 目の正面合わせ（frameeyeosc-panel --action recenter。eye_actions.h）
+    EyeFit,             ///< 目のフィット（frameeyeosc-panel --action fit。フィットの途中なら止める）
+    EyeRelearn,         ///< 普段の目を覚え直す（frameeyeosc-panel --action relearn。目のカメラが約 30 秒で覚え直す）
     Command,            ///< argv をそのまま実行（シェルは通さない）
 };

@@ -3,6 +3,7 @@
 
 #include "brightness.h"
 #include "draw.h"
+#include "eye_actions.h"
 #include "frame_apps_cairo.h"  // vendor/frame-apps/cpp
 #include "hud_render.h"
 #include "i18n.h"
@@ -279,7 +280,23 @@ double drawSlotMarks(const Pen& pen, int slot, double x, double cy) {
  */
 bool actionUsable(ActionType type, const PanelView& view) {
     if (type == ActionType::PerfOverlayToggle) return !(view.haveStatus && view.status.perfOverlay == AppState::Missing);
+    if (isEyeAction(type)) {
+        return view.eyePanel.state != EyePanelState::Missing && view.eyePanel.state != EyePanelState::Outdated;
+    }
     return true;
+}
+
+/**
+ * 使えないアクションの選択肢に付ける札（入っていない・更新が必要）。
+ * @param t 言語の表
+ * @param type 種類
+ * @param view 状態
+ * @return 札（使えるなら空）
+ */
+std::string unusableTag(const UiText& t, ActionType type, const PanelView& view) {
+    if (actionUsable(type, view)) return "";
+    if (isEyeAction(type) && view.eyePanel.state == EyePanelState::Outdated) return t.chipOutdated;
+    return t.chipMissing;
 }
 
 /**
@@ -370,6 +387,14 @@ std::string stateText(const UiText& t, const Action& action, const Config& confi
         case ActionType::MediaPlayPause:
         case ActionType::MediaNext:
         case ActionType::MediaPrevious: return t.stMedia;
+        case ActionType::EyeRecenter:
+        case ActionType::EyeFit:
+        case ActionType::EyeRelearn:
+            if (view.eyePanel.state == EyePanelState::Missing) return t.stEyeMissing;
+            if (view.eyePanel.state == EyePanelState::Outdated) return t.stEyeOutdated;
+            return action.type == ActionType::EyeRecenter ? t.stEyeRecenter
+                   : action.type == ActionType::EyeFit    ? t.stEyeFit
+                                                          : t.stEyeRelearn;
         case ActionType::Command: {
             const CommandDef* command = findCommand(config.commands, view.folderCommands, action.commandId);
             if (command == nullptr) return t.stCmdMissing;
@@ -705,6 +730,7 @@ PanelAction SettingsPanel::pointerDown(double x, double y, double now) {
     switch (action.kind) {
         case K::PickerActions: pickerSide_ = PickerSide::Actions; return PanelAction();
         case K::PickerMedia: pickerSide_ = PickerSide::Media; return PanelAction();
+        case K::PickerEye: pickerSide_ = PickerSide::Eye; return PanelAction();
         case K::PickerCommands: pickerSide_ = PickerSide::Commands; return PanelAction();
         case K::PickerPrev: pickerPage_ = std::max(0, pickerPage_ - 1); return PanelAction();
         case K::PickerNext: pickerPage_ = std::min(pickerPageCount_ - 1, pickerPage_ + 1); return PanelAction();
@@ -1290,6 +1316,7 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
         autoPicker_ = false;
         pickerSide_ = current.type == ActionType::Command ? PickerSide::Commands
                       : isMediaAction(current.type)       ? PickerSide::Media
+                      : isEyeAction(current.type)         ? PickerSide::Eye
                                                           : PickerSide::Actions;
         pickerPage_ = 0;
         for (size_t i = 0; i < commands.size(); ++i) {
@@ -1300,7 +1327,7 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
     }
     pickerPage_ = std::clamp(pickerPage_, 0, pickerPageCount_ - 1);
 
-    // 見出しの行: 見出し・説明（左）、「1 / 2」と［アクション｜音楽｜コマンド（件数）］（右）
+    // 見出しの行: 見出し・説明（左）、「1 / 2」と［アクション｜音楽｜目｜コマンド（件数）］（右）
     struct Segment {
         K kind;
         PickerSide side;
@@ -1310,9 +1337,10 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
     Segment segments[] = {
         {K::PickerActions, PickerSide::Actions, t.pickerActions, 0},
         {K::PickerMedia, PickerSide::Media, t.pickerMedia, 0},
+        {K::PickerEye, PickerSide::Eye, t.pickerEye, 0},
         {K::PickerCommands, PickerSide::Commands, formatText(t.pickerCommandsFormat, std::to_string(commands.size())), 0},
     };
-    double segW = 2 + 2 + 2 + 2 + 4 * 2;  // 枠の線と内側の余白（左右）＋ 区切りの間 2 つ
+    double segW = 2 + 2 + 2 + 2 + 4 * 3;  // 枠の線と内側の余白（左右）＋ 区切りの間 3 つ
     for (Segment& segment : segments) {
         segment.w = 32 + checkedLabelWidth(pen, segment.label, 16, pickerSide_ == segment.side);
         segW += segment.w;
@@ -1349,15 +1377,15 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
     const double gridY = rowY + headH + 10;
     const double chipGap = 10;  // 横の間
     const double rowGap = 8;    // 縦の間
-    const double chipW = (innerW - chipGap * 3) / 4;  // 音楽の側は 4 列の幅
+    const double chipW = (innerW - chipGap * 3) / 4;  // 音楽・目の側は 4 列の幅
     const double actionChipW = (innerW - chipGap * (kPickerActionCols - 1)) / kPickerActionCols;  // アクションの側は 5 列
     /**
-     * アクションの選択肢を 1 つ描く（アクション・音楽の側）。
+     * アクションの選択肢を 1 つ描く（アクション・音楽・目の側）。
      * @param type 種類
      * @param cx 左
      * @param cy 上
      * @param chipW 幅
-     * @param withIcon 名前の前にアイコンを描く（音楽の側）
+     * @param withIcon 名前の前にアイコンを描く（音楽・目の側）
      */
     const auto drawActionChip = [&](ActionType type, double cx, double cy, double chipW, bool withIcon) {
         const bool on = current.type == type;
@@ -1372,7 +1400,7 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
             fillRounded(pen, cx, cy, chipW, chipH, chipH / 2, isHot(assign) ? kControlHover : kControl);
             strokeRounded(pen, cx, cy, chipW, chipH, chipH / 2, isHot(assign) ? kAccent : kBorder, 2);
         }
-        const std::string tag = usable ? std::string() : std::string(t.chipMissing);
+        const std::string tag = unusableTag(t, type, view);
         const Color fg = on ? kOnAccent : (!usable ? kTextFaint : kText);
         const double tagW = tag.empty() ? 0 : pen.measure(tag, 12, true) + 8;
         const std::string label = actionLabel(lang, type);
@@ -1420,10 +1448,10 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
         addButton(assign, cx, cy, chipW, chipH);
     };
     if (pickerSide_ == PickerSide::Actions) {
-        // アクション: 5 列 × 2 段のグリッド（9 つ。「なし」は最後。音楽・コマンドはそれぞれの側で選ぶ）
+        // アクション: 5 列 × 2 段のグリッド（9 つ。「なし」は最後。音楽・目・コマンドはそれぞれの側で選ぶ）
         int index = 0;
         for (const ActionSpec& spec : actionSpecs()) {
-            if (spec.type == ActionType::Command || isMediaAction(spec.type)) continue;
+            if (spec.type == ActionType::Command || isMediaAction(spec.type) || isEyeAction(spec.type)) continue;
             drawActionChip(spec.type, innerX + (index % kPickerActionCols) * (actionChipW + chipGap),
                            gridY + (index / kPickerActionCols) * (chipH + rowGap), actionChipW, false);
             ++index;
@@ -1439,6 +1467,39 @@ void SettingsPanel::drawPicker(const Pen& pen, const UiText& t, const Config& co
             ++index;
         }
         const std::vector<std::string> lines = wrapText(pen, t.mediaNote, 14, innerW - 32, 2);
+        double top = gridY + chipH + rowGap + (chipH - lines.size() * 14 * 1.45) / 2;
+        for (const std::string& line : lines) {
+            pen.text(innerX + 16, lineBaseline(top, 14), line, 14, kTextMuted);
+            top += 14 * 1.45;
+        }
+        return;
+    }
+    if (pickerSide_ == PickerSide::Eye) {
+        // 目: 1 段目に 3 つ（音楽の側と同じ幅）と、使えないときのわけ（入っていない・更新が必要。赤）、2 段目に説明
+        int index = 0;
+        for (const ActionSpec& spec : actionSpecs()) {
+            if (!isEyeAction(spec.type)) continue;
+            drawActionChip(spec.type, innerX + index * (chipW + chipGap), gridY, chipW, true);
+            ++index;
+        }
+        const EyePanelInfo& eye = view.eyePanel;
+        std::string problem;
+        if (eye.state == EyePanelState::Missing) {
+            problem = t.eyeMissingNote;
+        } else if (eye.state == EyePanelState::Outdated) {
+            problem = t.eyeOutdatedNote;
+            if (!eye.version.empty()) problem += formatText(t.eyeVersionNowFormat, eye.version);
+        }
+        if (!problem.empty()) {
+            const double px = innerX + index * (chipW + chipGap) + 6;
+            const std::vector<std::string> lines = wrapText(pen, problem, 14, innerX + innerW - px - 16, 2);
+            double top = gridY + (chipH - lines.size() * 14 * 1.45) / 2;
+            for (const std::string& line : lines) {
+                pen.text(px, lineBaseline(top, 14), line, 14, kDanger, true);
+                top += 14 * 1.45;
+            }
+        }
+        const std::vector<std::string> lines = wrapText(pen, t.eyeNote, 14, innerW - 32, 2);
         double top = gridY + chipH + rowGap + (chipH - lines.size() * 14 * 1.45) / 2;
         for (const std::string& line : lines) {
             pen.text(innerX + 16, lineBaseline(top, 14), line, 14, kTextMuted);

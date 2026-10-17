@@ -62,6 +62,9 @@ struct UiText {
     const char* actMediaPlayPause;///< 再生・一時停止
     const char* actMediaNext;     ///< 次の曲
     const char* actMediaPrevious; ///< 前の曲
+    const char* actEyeRecenter;   ///< 目の正面合わせ
+    const char* actEyeFit;        ///< 目のフィット
+    const char* actEyeRelearn;    ///< 普段の目を覚え直す
     const char* actCmd;
     const char* actNone;
     // ---- 割り当てタブ ----
@@ -83,6 +86,11 @@ struct UiText {
     const char* stOriginal;        ///< aux の元の動きのカードの 2 行目
     const char* stRecenter;        ///< 視点のリセットのカードの 2 行目（今向いている方を正面にします）
     const char* stMedia;           ///< 音楽の操作のカードの 2 行目（Chrome などで流している音楽）
+    const char* stEyeRecenter;     ///< 目の正面合わせのカードの 2 行目（目の正面だけ合わせ直します）
+    const char* stEyeFit;          ///< 目のフィットのカードの 2 行目（視線とまぶたを合わせます）
+    const char* stEyeRelearn;      ///< 覚え直しのカードの 2 行目（普段の目を約 30 秒で覚え直します）
+    const char* stEyeMissing;      ///< frameeyeosc が入っていません（目のアクションのカードの 2 行目）
+    const char* stEyeOutdated;     ///< frameeyeosc の更新が必要です（同じ）
     const char* stCmdMissing;      ///< 割り当てたコマンドがもう無い
     const char* missingCommand;    ///< 消えたコマンド（カードの名前）
     const char* stNone;
@@ -91,10 +99,16 @@ struct UiText {
     const char* tapNoteTitle;         ///< ヘッドセットのタップ（タップのカードの横の説明の見出し）
     const char* tapNote;              ///< かぶっている間だけ使える・横を軽くたたく
     const char* chipMissing;          ///< 入っていない
+    const char* chipOutdated;         ///< 更新が必要（古い frameeyeosc）
     const char* pickerActions;        ///< アクション（割り当ての列の切り替え）
     const char* pickerCommandsFormat; ///< コマンド（%s）（%s は件数）
     const char* pickerMedia;          ///< 音楽（割り当ての列の切り替え）
     const char* mediaNote;            ///< 音楽の側の説明（MPRIS に対応したアプリ・PC の音は対象外）
+    const char* pickerEye;            ///< 目（割り当ての列の切り替え）
+    const char* eyeNote;              ///< 目の側の説明（frameeyeosc に頼む・フィットはもう一度で止まる・正面合わせはフィットのあと）
+    const char* eyeMissingNote;       ///< 目の側: frameeyeosc が入っていない（アプリのタブから入れられる）
+    const char* eyeOutdatedNote;      ///< 目の側: frameeyeosc を新しい版に更新してください
+    const char* eyeVersionNowFormat;  ///< 目の側: （今は %s）（%s は入っている版）
     const char* cmdAdd;               ///< ＋ コマンドを足す
     // ---- 明るさタブ ----
     const char* brightHeading;
@@ -275,6 +289,9 @@ struct UiText {
     const char* hudMediaNext;         ///< 次の曲
     const char* hudMediaPrevious;     ///< 前の曲
     const char* hudRecenter;          ///< 視点をリセットしました
+    const char* hudEyeStopped;        ///< 目のフィットを止めました
+    const char* hudEyeRelearning;     ///< 普段の目を覚え直しています
+    const char* hudEyeRelearnSub;     ///< 約 30 秒（覚え直しのお知らせの 2 行目。押し方のあと）
     const char* failMic;
     const char* failBright;
     const char* failPass;
@@ -289,6 +306,10 @@ struct UiText {
     const char* failMediaNext;        ///< 次の曲に進めません
     const char* failMediaPrevious;    ///< 前の曲に戻れません
     const char* failRecenter;         ///< 視点をリセットできません
+    const char* failEyeRecenter;      ///< 目の正面を合わせられません
+    const char* failEyeFit;           ///< 目のフィットを始められません
+    const char* failEyeStop;          ///< 目のフィットを止められません
+    const char* failEyeRelearn;       ///< 普段の目を覚え直せません
     const char* reasonNoSteamVr;
     const char* reasonRoomViewApi;
     const char* reasonPerfMissing;
@@ -299,6 +320,18 @@ struct UiText {
     const char* reasonMediaUnsupported;  ///< このアプリでは使えません
     const char* reasonNotWorn;        ///< ヘッドセットをかぶっている間だけ使えます（視点のリセット）
     const char* reasonNotTracking;    ///< ヘッドセットの位置が取れていません（視点のリセット）
+    const char* reasonEyeMissing;     ///< frameeyeosc が入っていません
+    const char* reasonEyeOutdated;    ///< frameeyeosc の更新が必要です
+    const char* reasonEyePanelStopped;///< frameeyeosc のパネルが動いていません
+    const char* reasonEyeNoAnswer;    ///< frameeyeosc のパネルが応答しません
+    const char* reasonEyeNotFitted;   ///< 先に目のフィットをしてください
+    const char* reasonEyeBusy;        ///< フィット中です
+    const char* reasonEyeRecenterBusy;///< 正面合わせ中です
+    const char* reasonEyeNotRunning;  ///< frameeyeosc が動いていません
+    const char* reasonEyeNoCameras;   ///< 目のカメラが使えません
+    const char* reasonEyeCamerasCalibrating;  ///< 目のカメラの校正中です
+    const char* reasonEyeCamerasNoVideo;      ///< 目のカメラの映像が来ていません
+    const char* reasonEyeLocked;      ///< frameeyeosc のコマンドラインで固定されています
     const char* reasonFailed;
     const char* subSep;               ///< 押し方と理由の間（・）
     // ---- 視界の表示（カーソルのときに aux を元に戻す・戻した） ----

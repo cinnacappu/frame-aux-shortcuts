@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(frame-aux-shortcuts VERSION 0.3.0 LANGUAGES CXX)
+project(frame-aux-shortcuts VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,7 +19,7 @@ pkg_check_modules(VULKAN REQUIRED IMPORTED_TARGET vulkan)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 
 # OpenVR も描画も使わない部分（判定・タップの判定・カーソルの判定・設定・状態ファイル・文言・コマンドの実行・OSC の送信・
-# 音楽の操作のアプリの選び方・視点のリセットの判断など）
+# 音楽の操作のアプリの選び方・視点のリセットの判断・目のアクション（frameeyeosc-panel に頼む）など）
 add_library(frame-aux-core STATIC
   src/press_detector.cpp
   src/brightness.cpp
@@ -40,11 +40,14 @@ add_library(frame-aux-core STATIC
   src/tap_detector.cpp
   src/media.cpp
   src/recenter.cpp
+  src/eye_actions.cpp
 )
 target_include_directories(frame-aux-core PUBLIC src)
 target_compile_options(frame-aux-core PRIVATE -Wall -Wextra)
 # 視界のお知らせの中身がアイコンの種類（icons.h → draw.h → cairo.h）を使うので、ヘッダーのために cairo をつなぐ
 target_link_libraries(frame-aux-core PUBLIC PkgConfig::CAIRO PkgConfig::FREETYPE)
+# 設定パネルの frameeyeosc-panel の確かめ（EyePanelWatcher）がスレッドを使う
+target_link_libraries(frame-aux-core PUBLIC Threads::Threads)
 
 # 描画（cairo）: 設定パネル・視界の表示の絵、自動起動、新しい版の確認（vendor/frame-updater）、ほかのアプリ（vendor/frame-apps）
 add_library(frame-aux-ui STATIC

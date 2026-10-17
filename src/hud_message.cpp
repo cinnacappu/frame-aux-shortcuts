@@ -1,6 +1,7 @@
 // 視界のお知らせの中身の決め方。
 #include "hud_message.h"
 
+#include "eye_actions.h"
 #include "i18n.h"
 #include "media.h"
 #include "osc.h"
@@ -18,6 +19,18 @@ std::string reasonText(Language language, const std::string& reason) {
     if (reason == kReasonMediaUnsupported) return t.reasonMediaUnsupported;
     if (reason == kReasonNotWorn) return t.reasonNotWorn;
     if (reason == kReasonNotTracking) return t.reasonNotTracking;
+    if (reason == kReasonEyeMissing) return t.reasonEyeMissing;
+    if (reason == kReasonEyeOutdated) return t.reasonEyeOutdated;
+    if (reason == kReasonEyePanelStopped) return t.reasonEyePanelStopped;
+    if (reason == kReasonEyeNoAnswer) return t.reasonEyeNoAnswer;
+    if (reason == kReasonEyeNotFitted) return t.reasonEyeNotFitted;
+    if (reason == kReasonEyeBusy) return t.reasonEyeBusy;
+    if (reason == kReasonEyeRecenterBusy) return t.reasonEyeRecenterBusy;
+    if (reason == kReasonEyeNotRunning) return t.reasonEyeNotRunning;
+    if (reason == kReasonEyeNoCameras) return t.reasonEyeNoCameras;
+    if (reason == kReasonEyeCamerasCalibrating) return t.reasonEyeCamerasCalibrating;
+    if (reason == kReasonEyeCamerasNoVideo) return t.reasonEyeCamerasNoVideo;
+    if (reason == kReasonEyeLocked) return t.reasonEyeLocked;
     return t.reasonFailed;
 }
 
@@ -75,6 +88,9 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
             case ActionType::MediaPlayPause: out.title = t.failMediaPlayPause; break;
             case ActionType::MediaNext: out.title = t.failMediaNext; break;
             case ActionType::MediaPrevious: out.title = t.failMediaPrevious; break;
+            case ActionType::EyeRecenter: out.title = t.failEyeRecenter; break;
+            case ActionType::EyeFit: out.title = press.value == kEyeStopped ? t.failEyeStop : t.failEyeFit; break;
+            case ActionType::EyeRelearn: out.title = t.failEyeRelearn; break;
             case ActionType::Command: out.title = t.failCmd; break;
             case ActionType::None: return false;
         }
@@ -145,6 +161,22 @@ bool makeHudToast(const PressRecord& press, Language language, HudToast& toast) 
                 out.title = next ? t.hudMediaNext : t.hudMediaPrevious;
             }
             if (!press.track.empty()) out.sub = press.track;
+            break;
+        case ActionType::EyeRecenter:
+        case ActionType::EyeFit:
+            // 始めたときは出さない（frameeyeosc がすぐ正面に点を出すので、視界の下のお知らせで目をそらさせない）。
+            // 途中のフィットを止めたときだけ出す
+            if (press.value != kEyeStopped) return false;
+            out.icon = Icon::EyeFit;
+            out.tone = HudToast::Tone::Neutral;
+            out.title = t.hudEyeStopped;
+            break;
+        case ActionType::EyeRelearn:
+            // 点を見る必要は無いので、始めたことを出す（ほかに手応えが無い。30 秒かかることも伝える）
+            out.icon = Icon::EyeRelearn;
+            out.tone = HudToast::Tone::Accent;
+            out.title = t.hudEyeRelearning;
+            out.sub += t.subSep + std::string(t.hudEyeRelearnSub);
             break;
         case ActionType::Command:
             out.icon = Icon::Terminal;

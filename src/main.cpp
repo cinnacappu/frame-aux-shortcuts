@@ -142,9 +142,12 @@ void printUsage() {
         "  --test-action TYPE   アクションを 1 回だけ実行して終わる（キー対応表は触らない）\n"
         "                       TYPE: mic_mute_toggle / brightness_cycle / room_view_toggle / screenshot /\n"
         "                             perf_overlay_toggle / dashboard_open / recenter / original_aux /\n"
-        "                             media_play_pause / media_next / media_previous / command / none\n"
+        "                             media_play_pause / media_next / media_previous / eye_recenter / eye_fit /\n"
+        "                             eye_relearn / command / none\n"
         "                       （command は設定の割り当てのうち最初のもののコマンドを使う）\n"
         "                       （recenter はヘッドセットをかぶっていなければ何もせずに失敗する）\n"
+        "                       （eye_recenter / eye_fit / eye_relearn は frameeyeosc-panel --action に頼む。\n"
+        "                         eye_fit はフィットの途中なら止める。eye_relearn は目のカメラが約 30 秒で覚え直す）\n"
         "  --send-osc TARGET ADDRESS  OSC の ADDRESS に 1 を送り、0.15 秒後に 0 を送って終わる（ボタンを押して離す）。\n"
         "                       TARGET: auto:9000（Steam Link でつないでいる PC）か <IPv4>:<ポート>。\n"
         "                       例: --send-osc auto:9000 /input/Voice（VRChat のミュートの切り替え）\n"
@@ -448,6 +451,23 @@ int runDumpHud(const Options& options) {
         {"recenter-tap", 2, ActionType::Recenter, true, "recentered", "", true},
         {"recenter-notworn", 0, ActionType::Recenter, false, "", "not_worn"},
         {"recenter-nottracking", 1, ActionType::Recenter, false, "", "not_tracking"},
+        {"eye-fit-stopped", 0, ActionType::EyeFit, true, "stopped", ""},
+        {"eye-fit-stop-failed", 0, ActionType::EyeFit, false, "stopped", "eye_no_answer"},
+        {"eye-fit-panel-stopped", 0, ActionType::EyeFit, false, "", "eye_panel_stopped"},
+        {"eye-fit-not-running", 0, ActionType::EyeFit, false, "", "eye_not_running"},
+        {"eye-fit-not-worn", 0, ActionType::EyeFit, false, "", "not_worn"},
+        {"eye-fit-recentering", 0, ActionType::EyeFit, false, "", "eye_recenter_busy"},
+        {"eye-recenter-recentering", 1, ActionType::EyeRecenter, false, "", "eye_recenter_busy"},
+        {"eye-fit-missing", 0, ActionType::EyeFit, false, "", "eye_missing"},
+        {"eye-recenter-not-fitted", 1, ActionType::EyeRecenter, false, "", "eye_not_fitted"},
+        {"eye-recenter-busy", 1, ActionType::EyeRecenter, false, "", "eye_busy"},
+        {"eye-recenter-outdated", 1, ActionType::EyeRecenter, false, "", "eye_outdated"},
+        {"eye-recenter-tap", 2, ActionType::EyeRecenter, false, "", "eye_no_answer", true},
+        {"eye-fit-locked", 0, ActionType::EyeFit, false, "", "eye_locked"},
+        {"eye-relearn", 2, ActionType::EyeRelearn, true, "relearning", "", true},
+        {"eye-relearn-no-cameras", 2, ActionType::EyeRelearn, false, "", "eye_no_cameras", true},
+        {"eye-relearn-calibrating", 3, ActionType::EyeRelearn, false, "", "eye_cameras_calibrating"},
+        {"eye-relearn-no-video", 3, ActionType::EyeRelearn, false, "", "eye_cameras_no_video"},
     };
     int written = 0;
     for (const Language lang : {Language::Ja, Language::En}) {

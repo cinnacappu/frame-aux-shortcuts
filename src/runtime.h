@@ -107,7 +107,15 @@ bool processIs(pid_t pid, const std::string& name);
 pid_t runningPid(const std::string& app);
 
 /**
- * 実行ファイルが入っているか（~/.local/bin と PATH を探す）。
+ * 実行ファイルを探す（~/.local/bin、次に PATH。systemd や Steam から起動したときは PATH に ~/.local/bin が無いため）。
+ * PATH の相対のフォルダ（'/' で始まらないもの）は飛ばす。
+ * @param name 実行ファイルの名前
+ * @return 見つかったパス（無ければ空）
+ */
+std::string findExecutable(const std::string& name);
+
+/**
+ * 実行ファイルが入っているか（findExecutable で見つかるか）。
  * @param name 実行ファイルの名前
  * @return 見つかれば true
  */

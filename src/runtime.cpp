@@ -133,17 +133,26 @@ pid_t runningPid(const std::string& app) {
     return processIs(static_cast<pid_t>(pid), app) ? static_cast<pid_t>(pid) : 0;
 }
 
-bool isInstalled(const std::string& name) {
+std::string findExecutable(const std::string& name) {
     const char* home = std::getenv("HOME");
-    if (home != nullptr && ::access((std::string(home) + "/.local/bin/" + name).c_str(), X_OK) == 0) return true;
+    if (home != nullptr) {
+        const std::string local = std::string(home) + "/.local/bin/" + name;
+        if (::access(local.c_str(), X_OK) == 0) return local;
+    }
     const char* path = std::getenv("PATH");
-    if (path == nullptr) return false;
+    if (path == nullptr) return "";
     std::stringstream dirs(path);
     std::string dir;
     while (std::getline(dirs, dir, ':')) {
-        if (!dir.empty() && ::access((dir + "/" + name).c_str(), X_OK) == 0) return true;
+        // 相対のフォルダ（空・"."・"bin" など）は飛ばす（その時のカレントディレクトリで中身が変わるので）
+        if (dir.empty() || dir[0] != '/') continue;
+        if (::access((dir + "/" + name).c_str(), X_OK) == 0) return dir + "/" + name;
     }
-    return false;
+    return "";
+}
+
+bool isInstalled(const std::string& name) {
+    return !findExecutable(name).empty();
 }
 
 bool runningAsUnit(const std::string& unit) {

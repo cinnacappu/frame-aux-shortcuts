@@ -3,13 +3,15 @@
 // SteamVR へのメールボックスの送信、スクリーンショットの保存先のフォルダ（PNG は vrcompositor が書く）、
 // 組み込みのコマンドの OSC（つないでいる PC への UDP）、aux の元の動きの入力（gpio-keys への write。keymap.h）、
 // 音楽・動画のアプリへの MPRIS のメソッドの呼び出し（セッションバス。media_control.h）、
-// 視点のリセットの頼み（IVRChaperone::ResetZeroPose。ファイルは書かない）だけ。
+// 視点のリセットの頼み（IVRChaperone::ResetZeroPose。ファイルは書かない）、
+// 目の正面合わせ・目のフィットの頼み（frameeyeosc-panel --action。eye_actions.h）だけ。
 // sysfs・/opt・/etc には触らない。PipeWire・WirePlumber の再起動もしない。トラッキング用のカメラも開かない。
 #include "actions.h"
 
 #include "brightness.h"
 #include "command.h"
 #include "commands.h"
+#include "eye_actions.h"
 #include "keymap.h"
 #include "media_control.h"
 #include "osc.h"
@@ -335,6 +337,14 @@ PreparedAction prepareAction(const Action& action, const Config& config, VrClien
             // D-Bus の呼び出し（と、次の曲の曲名を待つ間）でメインループを止めないよう、作業用スレッドで動かす
             const ActionType type = action.type;
             out.deferred = [type]() { return runMediaAction(type); };
+            break;
+        }
+        case ActionType::EyeRecenter:
+        case ActionType::EyeFit:
+        case ActionType::EyeRelearn: {
+            // frameeyeosc-panel の答え（ふだん 0.25 秒以内、パネルがあきらめるまで 2 秒。フィットを止めるときは 2 回）を待つので、作業用スレッドで動かす
+            const ActionType type = action.type;
+            out.deferred = [type]() { return runEyeAction(type); };
             break;
         }
         case ActionType::Command: {
